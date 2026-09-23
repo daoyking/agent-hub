@@ -1,0 +1,19 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # doctor/ask 需要本机已登录的引擎与真实 spawn，只在开发机上跑；
+      # CI 的职责边界到类型检查为止（见 README「本地数据与 CI 说明」）
+      - run: npm run typecheck

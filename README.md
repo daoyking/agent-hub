@@ -122,6 +122,20 @@ zai-mcp-server  stdio npx -y @z_ai/mcp-server     claude,codex
 - 诚实能力声明：P0 未实现 ACP 终端 → `terminal: false`（而不是宣告后报错）。
 - 审批三模式 + 每条审批留痕（`result.approvals`）。
 
+## 本地数据与 CI 说明
+
+所有运行时状态都在 **`~/.agentbd/`（仓库之外，永不入库）**：
+
+| 文件 | 内容 |
+|---|---|
+| `sessions/*.jsonl` | 每次 `ask` 的统一事件 transcript（含用量/审批留痕） |
+| `health.json` | 服务健康缓存，带 `at` 时间戳，聚合灯取最老一条的年龄 |
+| `services.json` | 服务清单（`services init` 生成骨架 + 手工校准，含 L2/L3 探针声明） |
+
+- `--json` 事件流里不含任何凭据：凭证只由各引擎自己从 Keychain / 自己的配置读取。
+- **CI 跑不了 `doctor`**：它要的是本机已登录的引擎（claude/codex/gemini/codebuddy/qoder）
+  和真实 spawn。CI 里只能跑 `npm run typecheck`；`doctor`/`ask` 属于本机自检命令。
+
 ## 下一步（P1）
 
 1. 用 `--json` 的 NDJSON 事件流接一个 Web UI（SSE），再套 Tauri 壳；服务灯 + MCP 视图直接进侧栏。
