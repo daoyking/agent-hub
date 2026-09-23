@@ -1,0 +1,32 @@
+{
+  "name": "agentbd",
+  "version": "0.1.0",
+  "description": "多 agent 统一总线（ACP 为中心）：把 Claude/Codex/Gemini/WorkBuddy/Qoder 等收敛成一套统一事件流",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "agentbd": "src/cli.ts"
+  },
+  "scripts": {
+    "engines": "node src/cli.ts engines",
+    "doctor": "node src/cli.ts doctor",
+    "ask": "node src/cli.ts ask",
+    "sessions": "node src/cli.ts sessions",
+    "services": "node src/cli.ts services",
+    "mcp": "node src/cli.ts mcp",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=22.6"
+  },
+  "dependencies": {
+    "@agentclientprotocol/claude-agent-acp": "^0.81.0",
+    "@agentclientprotocol/codex-acp": "^1.13.0",
+    "@agentclientprotocol/sdk": "^1.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}
