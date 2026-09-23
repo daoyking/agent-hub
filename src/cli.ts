@@ -21,6 +21,8 @@ import { runTurn } from './bus.ts';
 import type { ApprovalMode } from './policy.ts';
 import type { ApprovalRequest, NormalizedEvent } from './normalize.ts';
 import { listTranscripts, resolveResume, aggregateStats } from './sessions.ts';
+import { loadBudget, saveBudget, checkBudget, hasAnyLimit, BUDGET_FILE } from './budget.ts';
+import type { BudgetLimits } from './budget.ts';
 import {
   discover,
   probeService,
@@ -54,6 +56,7 @@ type Flags = {
   port: number;
   host: string;
   resume?: string;
+  noBudget: boolean;
   _: string[];
 };
 
@@ -70,6 +73,7 @@ function parseArgs(argv: string[]): Flags {
     agents: [],
     port: 7787,
     host: '127.0.0.1',
+    noBudget: false,
     _: [],
   };
   for (let i = 0; i < argv.length; i++) {
@@ -91,6 +95,7 @@ function parseArgs(argv: string[]): Flags {
     else if (a === '--url') flags.url = argv[++i];
     else if (a === '--port') flags.port = Number(argv[++i]);
     else if (a === '--host') flags.host = argv[++i]!;
+    else if (a === '--no-budget') flags.noBudget = true;
     else if (a === '--resume') {
       const v = argv[i + 1];
       if (v && !v.startsWith('-')) { flags.resume = v; i++; }
@@ -263,6 +268,7 @@ async function cmdAsk(flags: Flags): Promise<void> {
       onEvent: (ev) => renderEvent(ev, { json: flags.json, quiet: flags.quiet }),
       timeoutMs: flags.timeoutMs,
       mcpServers,
+      budget: flags.noBudget ? 'off' : undefined,
     });
 
     if (flags.json) {
@@ -307,6 +313,57 @@ async function cmdStats(): Promise<void> {
       `${r.engine.padEnd(11)} ${String(r.turns).padStart(4)} ${String(r.tokens).padStart(12)} $${r.costUsd.toFixed(4).padStart(9)}  ${r.lastTs ? new Date(r.lastTs).toLocaleString() : '-'}`,
     );
   }
+}
+
+async function cmdBudget(args: string[]): Promise<void> {
+  const sub = args[0];
+  if (sub === 'set') {
+    const limits = await loadBudget();
+    let n = 0;
+    for (const kv of args.slice(1)) {
+      const m = kv.match(/^(dailyUsd|monthlyUsd|dailyTokens|monthlyTokens|warnAt)=(\d+(?:\.\d+)?)$/);
+      if (!m) {
+        console.error(`无法识别: ${kv}（形如 dailyUsd=5 dailyTokens=100000 warnAt=0.8）`);
+        process.exitCode = 2;
+        return;
+      }
+      limits[m[1] as keyof BudgetLimits] = Number(m[2]);
+      n++;
+    }
+    if (n === 0) {
+      console.error('用法: agentbd budget set dailyUsd=5 dailyTokens=100000 warnAt=0.8');
+      process.exitCode = 2;
+      return;
+    }
+    await saveBudget(limits);
+    console.log(`已保存 → ${BUDGET_FILE}`);
+  } else if (sub === 'clear') {
+    await saveBudget({});
+    console.log('已清空全部限额');
+  } else if (sub !== undefined) {
+    console.error(`未知子命令: ${sub}（可用: set / clear，或不带参数查看）`);
+    process.exitCode = 2;
+    return;
+  }
+
+  const st = await checkBudget();
+  if (!hasAnyLimit(st.limits)) {
+    console.log('未设限额（agentbd budget set dailyTokens=100000 dailyUsd=5 …）');
+  } else {
+    console.log('限额:');
+    if (st.limits.dailyTokens) console.log(`  今日 tokens   ≤ ${st.limits.dailyTokens}`);
+    if (st.limits.dailyUsd) console.log(`  今日成本      ≤ $${st.limits.dailyUsd}`);
+    if (st.limits.monthlyTokens) console.log(`  本月 tokens   ≤ ${st.limits.monthlyTokens}`);
+    if (st.limits.monthlyUsd) console.log(`  本月成本      ≤ $${st.limits.monthlyUsd}`);
+    console.log(`  告警阈值      ${Math.round((st.limits.warnAt ?? 0.8) * 100)}%`);
+  }
+  console.log(
+    `用量: 今日 ${st.today.turns} 轮 · ${st.today.tokens} tok · $${st.today.costUsd.toFixed(4)}` +
+      ` ｜ 本月 ${st.month.turns} 轮 · ${st.month.tokens} tok · $${st.month.costUsd.toFixed(4)}`,
+  );
+  for (const w of st.warnings) console.log(`\x1b[33m⚠ ${w}\x1b[0m`);
+  for (const e of st.exceeded) console.log(`\x1b[31m✘ 超限: ${e}\x1b[0m`);
+  if (st.exceeded.length > 0) console.log('（超限状态下 ask 会被拦截；--no-budget 可临时跳过）');
 }
 
 const LAMP_ICON: Record<string, string> = { green: '🟢', amber: '🟡', red: '🔴', unknown: '⚪' };
@@ -562,8 +619,12 @@ const HELP = `agentbd 0.1.0 —— 多 agent + 本地服务 统一总线（P0 �
         --cwd DIR / --guard|--auto|--deny / --json / --timeout N
         --with-mcp                            把 MCP Hub 的清单注入该引擎会话
         --resume [last|<sessionId>]           续接已有会话（session/load 恢复，cwd 取原会话）
+        --no-budget                           临时跳过预算护栏
   agentbd sessions                              历史 transcript
   agentbd stats                                 用量看板（轮次/tokens/成本，按引擎聚合）
+  agentbd budget                                预算护栏：查看限额 + 今日/本月用量
+  agentbd budget set dailyTokens=100000 dailyUsd=5 [monthlyTokens=… warnAt=0.8]
+  agentbd budget clear                          清空限额
 
 引擎: ${BUILTIN_ENGINES.map((e) => e.id).join(', ')}
 清单: ${SERVICES_FILE}`;
@@ -583,6 +644,8 @@ async function main(): Promise<void> {
       return cmdSessions();
     case 'stats':
       return cmdStats();
+    case 'budget':
+      return cmdBudget(flags._);
     case 'services':
       return cmdServices(flags);
     case 'mcp':

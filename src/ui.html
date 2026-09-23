@@ -89,7 +89,21 @@ async function refresh() {
       const st = await (await fetch('/api/stats')).json();
       const rows = (st.byEngine || []).map((r) =>
         `<div class="row">${lamp('green')}${esc(r.engine)}<small>${r.turns} 轮 · ${r.tokens} tok · $${Number(r.costUsd).toFixed(4)}</small></div>`).join('');
-      $('stats').innerHTML = (st.total ? `<div class="row"><small>共 ${st.total.turns} 轮 · ${st.total.tokens} tok · $${Number(st.total.costUsd).toFixed(4)}</small></div>` : '') + (rows || '<div class="row">(无)</div>');
+      let budgetRow = '';
+      const b = st.budget;
+      if (b && b.limits) {
+        const parts = [];
+        if (b.limits.dailyTokens) parts.push(`今日 ${b.today.tokens}/${b.limits.dailyTokens} tok`);
+        if (b.limits.dailyUsd) parts.push(`今日 $${b.today.costUsd.toFixed(3)}/$${b.limits.dailyUsd}`);
+        if (b.limits.monthlyTokens) parts.push(`本月 ${b.month.tokens}/${b.limits.monthlyTokens} tok`);
+        if (b.limits.monthlyUsd) parts.push(`本月 $${b.month.costUsd.toFixed(2)}/$${b.limits.monthlyUsd}`);
+        if (parts.length) {
+          const over = (b.exceeded || []).length > 0;
+          budgetRow = `<div class="row">${lamp(over ? 'red' : 'green')}预算` +
+            `<small${over ? ' style="color:#f85149"' : ''}>${esc(parts.join(' · '))}${over ? ' ⚠ 超限（ask 已拦截）' : ''}</small></div>`;
+        }
+      }
+      $('stats').innerHTML = budgetRow + (st.total ? `<div class="row"><small>共 ${st.total.turns} 轮 · ${st.total.tokens} tok · $${Number(st.total.costUsd).toFixed(4)}</small></div>` : '') + (rows || '<div class="row">(无)</div>');
     } catch { /* stats 可选，失败不打断面板 */ }
   } catch (e) { $('status').textContent = '连接失败: ' + e; }
 }

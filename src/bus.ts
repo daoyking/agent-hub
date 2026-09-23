@@ -18,6 +18,7 @@ import type { NormalizedEvent, ApprovalRequest } from './normalize.ts';
 import { decide } from './policy.ts';
 import type { ApprovalMode } from './policy.ts';
 import { createTranscript } from './sessions.ts';
+import { checkBudget } from './budget.ts';
 
 export type EngineProfile = {
   protocolVersion: number;
@@ -58,6 +59,8 @@ export type RunTurnOptions = {
    * cwd 必须是原会话的 cwd（引擎按 cwd 归档）；由 resolveResume() 解析后传入。
    */
   resume?: { sessionId: string; cwd: string };
+  /** 'off' = 跳过预算护栏（CLI --no-budget）。默认检查：超限拦截、近限告警。 */
+  budget?: 'off';
 };
 
 /** 禁止 agent 套 agent：Agnes/WorkBuddy 自身也会拉起别的 agent，会翻倍消耗 */
@@ -83,6 +86,19 @@ function assertInside(root: string, target: string): void {
 
 export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
   assertNotNested();
+  // 预算护栏：spawn 引擎之前拦截（超限直接拒跑；近限发 notice 告警，CLI/Web 同源可见）
+  if (opts.budget !== 'off') {
+    const st = await checkBudget();
+    if (st.exceeded.length > 0) {
+      throw new Error(
+        `预算超限，已拦截本次调用：${st.exceeded.join('；')}。` +
+          `查看: agentbd budget；调整: agentbd budget set dailyTokens=…；临时跳过: --no-budget`,
+      );
+    }
+    for (const w of st.warnings) {
+      opts.onEvent?.({ k: 'notice', level: 'warn', text: `预算告警: ${w}` });
+    }
+  }
   const t0 = Date.now();
   const approvals: ApprovalLog[] = [];
   let text = '';

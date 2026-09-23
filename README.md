@@ -212,6 +212,20 @@ GET  /api/stats / agentbd stats                   → 轮次/tokens/成本，按
 - UI：审批条内嵌事件流（允许/拒绝按钮）、侧栏「用量」面板、ask 表单带续接输入框。
 - `agentbd stats`：27 transcripts · 17.3 万 tokens · $0.47（claude 计费，agnes 未返回成本）。
 
+### 12. 预算护栏：看板的闭环（能看 → 能限）
+
+```
+$ agentbd budget set dailyTokens=100000 dailyUsd=5 [monthlyTokens=… warnAt=0.8]
+$ agentbd budget                 → 限额 + 今日/本月用量 + 超限/告警状态
+$ agentbd ask agnes …            → 超限: "预算超限，已拦截本次调用：今日 tokens …"（spawn 前就拒，exit=1）
+$ agentbd ask … --no-budget      → 临时跳过
+```
+
+- 限额存 `~/.agentbd/budget.json`（原子写）；`runTurn` 在 **spawn 引擎之前**检查，CLI/Web 同源生效；
+  近限（默认 80%）发 notice 告警（SSE 直接可见），Web 用量面板顶部有预算灯（超限变红）。
+- 口径：tokens 全引擎有效；costUsd 只对回传成本的引擎（claude）累计——agnes 要限请用 tokens。
+- E2E：`dailyTokens=1` → ask 被拦截（exit=1）→ `budget clear` → ask 恢复（真实 OK 回合）。
+
 ## 安全边界（P0 已实现）
 
 - `AGENTBD_DEPTH` 守卫：**禁止 agent 套 agent**（Agnes/WorkBuddy 内部也会拉起别的 agent，会翻倍消耗）。
@@ -238,5 +252,5 @@ GET  /api/stats / agentbd stats                   → 轮次/tokens/成本，按
 1. ~~等 AgnesCode GUI 同步 key~~ → 已完成（custom provider + requiresAuth，见 §9）。
 2. Web 面板加 Tauri 壳；~~审批中心~~ → 已完成（§11）。
 3. MCP Hub 继续补全：dir 型源（trae）写回、per-MCP tool 级缓存与调用统计。
-4. transcript 迁 SQLite；~~会话恢复（session/load）~~ → 已完成（§10）；用量看板加预算护栏；
+4. transcript 迁 SQLite；~~会话恢复（session/load）~~ → 已完成（§10）；~~用量看板加预算护栏~~ → 已完成（§12）；
    对接 `~/.omh`（oh-my-hermes）已有服务清单。

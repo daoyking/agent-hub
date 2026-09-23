@@ -25,6 +25,7 @@ import { runTurn } from './bus.ts';
 import { discover, probeService, loadManifest } from './services.ts';
 import { scanMcp, toAcpMcpServers } from './mcphub.ts';
 import { resolveResume, aggregateStats } from './sessions.ts';
+import { checkBudget } from './budget.ts';
 import type { LocalService } from './services.ts';
 import type { NormalizedEvent } from './normalize.ts';
 import type { ApprovalRequest } from './normalize.ts';
@@ -266,7 +267,7 @@ export async function startServer(opts: {
           json(res, 200, { decided: true, allow });
           broadcast({ k: 'approval.decided', id, engine: pending.engine, allow });
         } else if (req.method === 'GET' && url.pathname === '/api/stats') {
-          json(res, 200, await aggregateStats());
+          json(res, 200, { ...(await aggregateStats()), budget: await checkBudget() });
         } else if (req.method === 'POST' && url.pathname === '/api/refresh') {
           const state = await gatherState();
           json(res, 200, state);

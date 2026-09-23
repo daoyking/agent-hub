@@ -90,8 +90,9 @@ export type Stats = { total: StatsTotals; byEngine: StatsEngineRow[]; scanned: n
 /**
  * 用量看板数据：扫 transcript（meta + ev 两行结构）。
  * tokens/cost 取每个文件**最后一条** usage 事件（引擎发的是会话内累计快照，逐文件求和 ≈ 总处理量）。
+ * `since`：只统计 meta.ts ≥ since 的会话（预算护栏的"今日/本月"窗口用）。
  */
-export async function aggregateStats(limit = 500): Promise<Stats> {
+export async function aggregateStats(limit = 500, since?: number): Promise<Stats> {
   const byEngine = new Map<string, StatsEngineRow>();
   let scanned = 0;
   let files: string[] = [];
@@ -135,6 +136,7 @@ export async function aggregateStats(limit = 500): Promise<Stats> {
       }
     }
     const row = byEngine.get(engine) ?? { engine, turns: 0, tokens: 0, costUsd: 0, lastTs: 0 };
+    if (since !== undefined && ts < since) continue; // 窗口外：scanned 照计，但不入聚合
     row.turns += 1;
     row.tokens += tokens;
     row.costUsd += cost;
