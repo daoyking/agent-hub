@@ -43,7 +43,7 @@ node src/cli.ts ask claude --with-mcp "..."  # 把 MCP Hub 清单注入该引擎
 
 ## P0 已验证结论（2026-09-23）
 
-### 1. `doctor`：5/5 引擎握手成功
+### 1. `doctor`：6/6 引擎握手成功
 
 | 引擎 | 耗时 | 能力（真实协商结果） | 认证方式 |
 |---|---|---|---|
@@ -52,6 +52,7 @@ node src/cli.ts ask claude --with-mcp "..."  # 把 MCP Hub 清单注入该引擎
 | gemini | 1855ms | `loadSession` `prompt.image/audio/embeddedContext` | oauth-personal / api-key / vertex / gateway |
 | codebuddy（WorkBuddy 内置） | 1694ms | `loadSession` `prompt.image/embeddedContext` **`delegateTools`** | iOA / internal / external / selfhosted |
 | qoder | 1987ms | 最丰富：`session.fork/resume/list/delete/close` | qodercli-login |
+| **agnes（agnesd，acp-service 通道）** | **81ms** | `loadSession` `session.list/close` `prompt.image/audio/embeddedContext` | agnes-provider（见 P1 节的 key 说明） |
 
 > 这张表就是设计方案 §5.2「能力不对称」的实证：**不做 capability gating 的 UI 一定会点了报错**。
 
@@ -115,6 +116,58 @@ zai-mcp-server  stdio npx -y @z_ai/mcp-server     claude,codex
 - `ask claude --with-mcp` 实测：4 个 MCP 注入 `session/new`，死的 browseros-neo 只出一条黄色告警、
   不炸会话 → `stop=end_turn · 5425ms · $0.070`（deny 模式）。
 
+## P1 已验证结论（2026-09-23）
+
+### 6. Agnes 适配器：逆向 `agnesd` 的 TCP 传输（设计里"传输未公开"已破）
+
+`agnesd` 不是 stdio——它是 goose-server 1.62.6 fork，起**本地 HTTPS + WebSocket**：
+
+```
+spawn: agnesd agent  env=AGNES_PORT:<空闲端口>, AGNES_SERVER__SECRET_KEY:<random32>
+stdout: GOOSED_CERT_FINGERPRINT=<sha256>   ← 抓下来 pin，防本地代理劫持
+连接:   wss://127.0.0.1:<port>/acp?token=<secret>   帧 = 一条 JSON-RPC（必须 text frame！）
+桥接:   WS frame ↔ acp.ndJsonStream → bus/doctor 完全无感（新增 channel: acp-service）
+```
+
+- `doctor agnes` → `✔ PASS agnes 125ms · agnes 1.62.6`（全量 **6/6**）。
+- 踩坑实录：① `ws` 默认发 binary frame，server 直接忽略（`Ignoring binary message`）→ 必须 `.toString()`；
+  ② 不注入 `AGNES_DEFAULT_PROVIDER/MODEL` 时会话建得起来但 prompt 报 `Provider not set`；
+  ③ 真实回合还差 `AGNES_AI_API_KEY`——**全机持久化位置（服务端 config/keyring/config.yaml）均为 null**，
+  desktop 只在内存里注入登录 accessToken。→ 打开 AgnesCode GUI 登录一次即可同步写入，之后 `ask agnes` 即通；
+  适配器已对这个错误给出可操作提示（不用翻 stderr 猜）。
+
+### 7. MCP Hub 从"只读视图"变成可写 + 工具级探针
+
+```
+$ agentbd mcp probe
+✔ node_repl               144ms  4 tools      js, js_add_node_module_dir, js_reset, turn_ended
+✔ zai-mcp-server         1589ms  8 tools      ui_to_artifact, extract_text_from_screenshot, …
+✘ browseros-neo             8ms  0 tools      fetch failed        ← 服务红灯，如实报
+⊘ computer-use               0ms  0 tools      (配置里 enabled=false)
+2/4 个 MCP 握手成功
+```
+
+- **两盏灯分开报**：L1 端口灯 ≠ MCP 协议灯（`initialize → tools/list` 真握手才算数）。
+- `mcp add <name> --url <url> [--agents claude,codex]` / `mcp add <name> <cmd...>` 实测 roundtrip：
+  写进 `~/.claude.json`（2-space JSON）与 `~/.codex/config.toml`（`[mcp_servers.x]` 段编辑）→
+  重扫可见 → `mcp remove` 后与 `.agentbd.bak` 备份逐字节比对仅差 EOF 空行。
+- 安全约束：只动 MCP key、写前必备份、tmp+rename 原子写、不存在的配置文件不代建、dir 型源拒写。
+
+### 8. Web 面板：`agentbd serve`（SSE，零构建）
+
+```
+$ agentbd serve --port 7787
+agentbd 面板已启动: http://127.0.0.1:7787
+GET /api/state → engines×6 · services×9（带灯）· mcp×4（带服务灯）
+POST /api/ask {engine:"claude",prompt:"只回复两个字母：OK"} 经 SSE 收流:
+  ask.event(msg.delta…) → ask.done{stopReason:end_turn, 8742ms, $0.142, transcript 已落盘}
+```
+
+- 侧栏三块：引擎 / 服务灯 / MCP（服务灯直接显示在 MCP 上），主区 ask 输入框 + 实时事件流。
+- 事件模型与 CLI **同源**（`bus.runTurn → NormalizedEvent`），UI 只是把 ANSI 行换成组件；
+  面板只绑 `127.0.0.1`，不落任何新状态（transcript 仍进 `~/.agentbd/sessions/`）。
+- `src/ui.html` 原生 HTML+JS+EventSource，无打包步骤（Tauri 壳留给下一步）。
+
 ## 安全边界（P0 已实现）
 
 - `AGENTBD_DEPTH` 守卫：**禁止 agent 套 agent**（Agnes/WorkBuddy 内部也会拉起别的 agent，会翻倍消耗）。
@@ -136,9 +189,10 @@ zai-mcp-server  stdio npx -y @z_ai/mcp-server     claude,codex
 - **CI 跑不了 `doctor`**：它要的是本机已登录的引擎（claude/codex/gemini/codebuddy/qoder）
   和真实 spawn。CI 里只能跑 `npm run typecheck`；`doctor`/`ask` 属于本机自检命令。
 
-## 下一步（P1）
+## 下一步
 
-1. 用 `--json` 的 NDJSON 事件流接一个 Web UI（SSE），再套 Tauri 壳；服务灯 + MCP 视图直接进侧栏。
-2. MCP Hub 从"只读视图"升级为可写：`mcp add/remove` 回写各 agent 配置 + 对每个 MCP 做工具级探针。
-3. transcript 迁 SQLite + 会话恢复（`session/load`，5 个引擎都支持）。
-4. Skills 单点分发；用量/成本看板 + 预算护栏；对接 `~/.omh`（oh-my-hermes）已有的服务清单。
+1. 等 AgnesCode GUI 同步 `AGNES_AI_API_KEY` 后端到端验 `ask agnes`（transport/doctor 已完成，只差 key）。
+2. Web 面板加 Tauri 壳 + 审批中心（guard 模式的 y/N 目前只在 CLI 里交互）。
+3. MCP Hub 继续补全：dir 型源（trae）写回、per-MCP tool 级缓存与调用统计。
+4. transcript 迁 SQLite + 会话恢复（`session/load`，引擎均支持）；用量/成本看板 + 预算护栏；
+   对接 `~/.omh`（oh-my-hermes）已有服务清单。

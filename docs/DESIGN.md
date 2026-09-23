@@ -99,7 +99,7 @@ type NormalizedEvent =
 | Codex | ACP 适配器 / `codex app-server`(完整 JSON-RPC) 备 | P0 | app-server 保真度最高 |
 | Gemini CLI | 原生 ACP | P0 | 顺手白拿 |
 | **WorkBuddy** | 驱动内置 `codebuddy --acp` | P0 | 已实测通过，GUI 不参与 |
-| **Agnes Code** | 复用其 provider 配置 + 自写 `agnesd agent` 适配器 | P1 | goose 内核，最可能官方 ACP 化 |
+| **Agnes Code** | `agnesd agent` + wss `/acp?token=`（自建 acp-service 通道） | **P0 已接入** | goose 内核；doctor PASS，真实回合待 GUI 同步 key |
 | **TRAE SOLO CN** | `serve-web` → webview；复用其 `~/.trae-cn/mcps`、`skills` | P2 | **不支持内核级统一**，UI 需视觉隔离 |
 | Cline / OpenWorker / Omnigent / ccgui | 各自 CLI/ACP | P1 | Cline 有 `cline --acp` |
 | 其余 30+ 家 | 照抄 registry `distribution` | P2 | 加一条 = 一个 JSON 条目 |
@@ -111,9 +111,16 @@ type NormalizedEvent =
   **MCP Hub**（17 个配置源归一去重 → 关联服务灯 → `--with-mcp` 注入任意引擎）。
   验收：同一份代码驱动 5 引擎握手成功；claude 与 codebuddy 完成真实 prompt 轮次并落盘；
   服务面板 8 个服务出灯，MCP 视图点名"服务红 ⇒ 引用它的 MCP 全挂"的因果链。
-- **P1** Web UI（消费 `--json` 事件流）+ Tauri 壳；审批中心；MCP Hub 可写（add/remove 回写 + 工具级探针）；
-  Skills 单点分发；用量/成本看板 + 预算护栏；transcript 迁 SQLite + `session/load` 恢复。
-- **P2** TRAE serve-web 内嵌；Agnes 适配器；桥接 Orca（worktree 隔离 + 编排）；任务 Inbox；多 agent DAG。
+- **P1（核心已完成，2026-09-23）**：
+  ✅ **Agnes 适配器**——逆向出 `agnesd` 的 TLS+WebSocket 传输（`wss://…/acp?token=`、
+  证书指纹 pin、text frame 约束），新增 `acp-service` 通道，doctor 6/6；
+  真实回合仅差 `AGNES_AI_API_KEY`（本机持久层为 null，等 GUI 登录同步）。
+  ✅ **Web UI**——`agentbd serve`：`/api/state` 聚合 + `/events` SSE + `POST /api/ask`，
+  服务灯/MCP 视图进侧栏，事件模型与 CLI 同源；已实测 claude 回合经面板完成。
+  ✅ **MCP Hub 可写**——`mcp add/remove` 回写 JSON/TOML 配置源（备份+原子写）+
+  `mcp probe` 工具级握手（stdio + Streamable HTTP）。
+  ⬜ 待办：Tauri 壳、审批中心、Skills 分发、用量看板、transcript SQLite、`session/load` 恢复。
+- **P2** TRAE serve-web 内嵌；桥接 Orca（worktree 隔离 + 编排）；任务 Inbox；多 agent DAG。
 - **P3** ACP over WebSocket 远程接入；团队共享 skills/MCP 模板。
 
 ## 4. 风险与对策
@@ -132,12 +139,13 @@ type NormalizedEvent =
 ## 5. 实证记录（2026-09-23）
 
 ```
-doctor:  5/5 PASS
+doctor:  6/6 PASS（agnes 为 acp-service 通道：wss 桥接 81ms）
   claude    1768ms  claude-agent-acp 0.81.0  caps: loadSession session.subagents session.fork/list/...
   codex     5849ms  codex-acp 1.13.0         auth: api-key, chat-gpt
   gemini    1855ms  gemini-cli 0.46.0        caps: loadSession prompt.image/audio/embeddedContext
   codebuddy 1694ms  (WorkBuddy 内置)          caps: ... delegateTools
   qoder     1987ms  qoder-cli 1.1.34         caps: 最丰富 session.fork/resume/list/delete/close
+  agnes       81ms  agnes 1.62.6（agnesd = goose-server fork，TLS+wss /acp?token=）
 
 ask:
   claude    → pong · 7299ms · in=25424 out=9 · $0.1276155 · transcript 已落盘
@@ -156,6 +164,15 @@ mcp（17 源归一后 4 条）:
   browseros-neo http://127.0.0.1:9010/mcp ← claude,codex,cursor,opencode → 服务灯 🔴
   ask claude --with-mcp → 4 个 MCP 注入 session/new，死服务只告警不炸会话
                           stop=end_turn · 5425ms · $0.070
+
+mcp probe（工具级，P1）:
+  ✔ node_repl 144ms 4 tools · ✔ zai-mcp-server 1589ms 8 tools
+  ✘ browseros-neo fetch failed（服务红）· ⊘ computer-use enabled=false → 2/4 握手成功
+  mcp add/remove roundtrip：~/.claude.json + ~/.codex/config.toml 写入→重扫→移除→与备份比对 ✅
+
+serve（Web 面板，P1）:
+  GET /api/state → engines×6 · services×9（灯）· mcp×4（带服务灯）
+  POST /api/ask claude → SSE ask.event×8 → ask.done end_turn · 8742ms · $0.142 · transcript 落盘
 ```
 
 > 后两条恰好说明聚合器的产品价值：**各家额度/订阅/凭据状态第一次能被集中看见**。

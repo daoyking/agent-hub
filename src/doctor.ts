@@ -20,7 +20,7 @@ export type ProbeResult = {
 
 export async function probe(spec: EngineSpec, cwd = process.cwd(), timeoutMs = 25000): Promise<ProbeResult> {
   const t0 = Date.now();
-  const agent = launch(spec, { cwd });
+  const agent = await launch(spec, { cwd });
   try {
     const profile = await Promise.race([
       (async () =>

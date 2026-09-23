@@ -84,7 +84,7 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
   let costUsd: number | undefined;
 
   process.env.AGENTBD_DEPTH = String(Number(process.env.AGENTBD_DEPTH ?? '0') + 1);
-  const agent = launch(opts.spec, { cwd: opts.cwd });
+  const agent = await launch(opts.spec, { cwd: opts.cwd });
 
   const app = acp
     .client({ name: 'agentbd' })

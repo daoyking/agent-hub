@@ -22,8 +22,19 @@ export type EngineSpec = {
   command: string;
   args: string[];
   env?: Record<string, string>;
-  /** 接入方式：acp=原生 ACP；acp-adapter=npx 适配器；headless/pty 见设计方案 §3.3 */
-  channel: 'acp' | 'acp-adapter';
+  /** 接入方式：acp=原生 ACP；acp-adapter=npx 适配器；acp-service=起本地服务再连 wss（agnesd） */
+  channel: 'acp' | 'acp-adapter' | 'acp-service';
+  /** channel=acp-service 专用：如何把服务拉起并连上 ACP */
+  service?: {
+    /** 监听端口注入到该 env 变量名（agnesd: AGNES_PORT） */
+    portEnv: string;
+    /** 会话密钥注入到该 env 变量名，连 wss 时以 ?token= 携带 */
+    secretEnv: string;
+    /** ACP WebSocket 路径（默认 /acp） */
+    path?: string;
+    /** 从 stdout 抓 TLS 证书指纹的前缀（用于 pin，防本地代理劫持） */
+    fingerprintPrefix?: string;
+  };
   /** 认证提示（doctor 会打印） */
   authHint?: string;
   /** 备注 */
@@ -102,6 +113,28 @@ export const BUILTIN_ENGINES: EngineSpec[] = [
     channel: 'acp',
     authHint: 'authMethods: qodercli-login',
     note: '原生 ACP；额外支持 session list/fork/resume',
+  },
+  {
+    id: 'agnes',
+    label: 'Agnes Code (agnesd)',
+    vendor: 'Agnes',
+    command: '/Applications/AgnesCode.app/Contents/Resources/bin/agnesd',
+    args: ['agent'],
+    channel: 'acp-service',
+    service: {
+      portEnv: 'AGNES_PORT',
+      secretEnv: 'AGNES_SERVER__SECRET_KEY',
+      path: '/acp',
+      fingerprintPrefix: 'GOOSED_CERT_FINGERPRINT=',
+    },
+    authHint: '复用 ~/.agnes/config/config.yaml 的 active_provider；缺失先在 Agnes GUI 里配好',
+    env: {
+      // 实测：不注入这两个 env，session/prompt 报 "Provider not set"
+      // （desktop 启动 agnesd 时同样注入，见 app bundle 的 AGNES_DEFAULT_PROVIDER/MODEL）
+      AGNES_DEFAULT_PROVIDER: 'agnes',
+      AGNES_DEFAULT_MODEL: 'auto',
+    },
+    note: 'agnesd = goose-server 1.62.6 fork：本地 HTTPS + wss://…/acp?token=（非 stdio，实测 2026-09-23）',
   },
 ];
 

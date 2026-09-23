@@ -33,7 +33,12 @@ import {
   SERVICES_FILE,
 } from './services.ts';
 import type { Health, ProbeLevel } from './services.ts';
-import { scanMcp, toAcpMcpServers } from './mcphub.ts';
+import { scanMcp, toAcpMcpServers, MCP_SOURCES } from './mcphub.ts';
+import { probeMcpEntry } from './mcpprobe.ts';
+import type { McpProbeResult } from './mcpprobe.ts';
+import { addMcp, removeMcp } from './mcpwrite.ts';
+import type { McpWriteSpec } from './mcpwrite.ts';
+import { startServer } from './server.ts';
 
 type Flags = {
   cwd: string;
@@ -44,6 +49,10 @@ type Flags = {
   probeLevel: ProbeLevel;
   withMcp: boolean;
   all: boolean;
+  agents: string[];
+  url?: string;
+  port: number;
+  host: string;
   _: string[];
 };
 
@@ -57,6 +66,9 @@ function parseArgs(argv: string[]): Flags {
     probeLevel: 'l2',
     withMcp: false,
     all: false,
+    agents: [],
+    port: 7787,
+    host: '127.0.0.1',
     _: [],
   };
   for (let i = 0; i < argv.length; i++) {
@@ -73,6 +85,11 @@ function parseArgs(argv: string[]): Flags {
     else if (a === '--l3') flags.probeLevel = 'l3';
     else if (a === '--with-mcp') flags.withMcp = true;
     else if (a === '--all') flags.all = true;
+    else if (a === '--agents')
+      flags.agents = (argv[++i] ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+    else if (a === '--url') flags.url = argv[++i];
+    else if (a === '--port') flags.port = Number(argv[++i]);
+    else if (a === '--host') flags.host = argv[++i]!;
     else flags._.push(a);
   }
   return flags;
@@ -337,6 +354,91 @@ async function cmdServices(flags: Flags): Promise<void> {
 }
 
 async function cmdMcp(flags: Flags): Promise<void> {
+  const sub = flags._[0] ?? 'list';
+  const arg = flags._[1];
+
+  // —— 工具级探针：证明 MCP 协议真能说话（不是端口开着就算数）——
+  if (sub === 'probe') {
+    const probed = await Promise.all(
+      (await discover()).map(async (s) => ({ ...s, health: await probeService(s, 'l1') })),
+    );
+    let entries = await scanMcp(probed);
+    if (arg) entries = entries.filter((e) => e.name === arg);
+    const results: McpProbeResult[] = await Promise.all(entries.map((e) => probeMcpEntry(e)));
+    if (flags.json) {
+      process.stdout.write(JSON.stringify({ at: Date.now(), results }, null, 2) + '\n');
+      return;
+    }
+    if (results.length === 0) {
+      console.log('(没有匹配的 MCP)');
+      return;
+    }
+    console.log('MCP 工具级探针（initialize → tools/list）\n');
+    for (const r of results) {
+      const icon = r.ok ? '\x1b[32m✔' : r.skipped ? '\x1b[2m⊘' : '\x1b[31m✘';
+      const tools = r.tools ?? [];
+      console.log(`${icon} ${r.name.padEnd(20)} ${String(r.ms).padStart(6)}ms  ${tools.length} tools\x1b[0m`);
+      if (r.ok && tools.length) console.log(`      ${tools.slice(0, 8).join(', ')}${tools.length > 8 ? ' …' : ''}`);
+      if (r.skipped) console.log(`      (${r.error})`);
+      else if (!r.ok) console.log(`      ${r.error}`);
+    }
+    const okCount = results.filter((r) => r.ok).length;
+    console.log(`\n${okCount}/${results.length} 个 MCP 握手成功`);
+    if (okCount < results.length) process.exitCode = 1;
+    return;
+  }
+
+  // —— 写回：add 到各 agent 配置源（先备份，原子写）——
+  if (sub === 'add') {
+    const name = arg;
+    const [command, ...rest] = flags._.slice(2);
+    if (!name || (!flags.url && !command)) {
+      console.error(
+        '用法: agentbd mcp add <name> --url <url> [--agents claude,codex]\n      agentbd mcp add <name> <command...> [--agents claude,codex]',
+      );
+      process.exitCode = 2;
+      return;
+    }
+    const agents = flags.agents.length ? flags.agents : ['claude', 'codex'];
+    const spec: McpWriteSpec | undefined = flags.url
+      ? { kind: 'http', url: flags.url, type: flags.url.includes('/sse') ? 'sse' : 'http' }
+      : command
+        ? { kind: 'stdio', command, args: rest }
+        : undefined;
+    if (!spec) return;
+    const out = await addMcp(name, spec, agents);
+    if (flags.json) {
+      process.stdout.write(JSON.stringify(out, null, 2) + '\n');
+      return;
+    }
+    for (const o of out) {
+      const icon = o.action === 'absent' || o.action === 'skipped' ? '·' : '✔';
+      console.log(`${icon} ${o.agent.padEnd(12)} ${o.action.padEnd(8)} ${o.detail ?? o.file}`);
+    }
+    return;
+  }
+
+  if (sub === 'remove') {
+    const name = arg;
+    if (!name) {
+      console.error('用法: agentbd mcp remove <name> [--agents claude,codex]');
+      process.exitCode = 2;
+      return;
+    }
+    const out = await removeMcp(name, flags.agents);
+    if (flags.json) {
+      process.stdout.write(JSON.stringify(out, null, 2) + '\n');
+      return;
+    }
+    if (out.length === 0) {
+      console.log(`(所有配置源里都没有 ${name})`);
+      return;
+    }
+    for (const o of out) console.log(`✔ ${o.agent.padEnd(12)} ${o.action} ${o.file}`);
+    return;
+  }
+
+  // —— list（默认）——
   // 先做一次便宜的 L1 探测：MCP 的灯取决于它背后那个本地服务活没活
   const probed = await Promise.all(
     (await discover()).map(async (s) => ({ ...s, health: await probeService(s, 'l1') })),
@@ -363,9 +465,31 @@ async function cmdMcp(flags: Flags): Promise<void> {
     for (const d of dead) console.log(`   - ${d.name} → ${d.target}`);
   }
   console.log(`\n提示：\`agentbd ask <engine> --with-mcp ...\` 会把上面这份清单注入该引擎的会话（一份配置喂所有引擎）。`);
+  console.log('子命令: `mcp probe` 工具级握手 · `mcp add/remove` 写回各 agent 配置');
 }
 
-const HELP = `agentbd 0.1.0 —— 多 agent + 本地服务 统一总线（P0）
+async function cmdServe(flags: Flags): Promise<void> {
+  try {
+    const { url, server } = await startServer({ port: flags.port, host: flags.host });
+    console.log(`agentbd 面板已启动: ${url}`);
+    console.log('  GET  /            单页面板（引擎 + 服务灯 + MCP）');
+    console.log('  GET  /events      SSE 事件流');
+    console.log('  GET  /api/state   聚合状态   POST /api/ask {engine,prompt,withMcp}');
+    console.log('  Ctrl+C 退出');
+    const shutdown = () => {
+      server.close(() => process.exit(0));
+      setTimeout(() => process.exit(0), 1500).unref();
+    };
+    process.on('SIGINT', shutdown);
+    process.on('SIGTERM', shutdown);
+    await new Promise(() => {}); // 常驻
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exitCode = 1;
+  }
+}
+
+const HELP = `agentbd 0.1.0 —— 多 agent + 本地服务 统一总线（P0 总线 + 服务层 + MCP Hub；P1 面板/写回/agnes）
 用法:
   【服务层】
   agentbd services [--l1|--l2|--l3] [--all] [--json]  本地服务健康（L1端口/L2接口/L3语义）；--all 含未声明的裸监听
@@ -376,6 +500,13 @@ const HELP = `agentbd 0.1.0 —— 多 agent + 本地服务 统一总线（P0）
 
   【MCP 接线】
   agentbd mcp [--json]                          统一 MCP 视图（跨所有 agent 去重 + 关联本地服务）
+  agentbd mcp probe [name] [--json]             工具级探针（initialize → tools/list，stdio/http）
+  agentbd mcp add <name> --url <url> [--agents a,b]   写回各 agent 配置（先备份 .agentbd.bak）
+  agentbd mcp add <name> <command...> [--agents a,b]  同上（stdio 型）
+  agentbd mcp remove <name> [--agents a,b]      从各 agent 配置移除
+
+  【Web 面板（P1）】
+  agentbd serve [--port 7787] [--host 127.0.0.1]       本地面板：服务灯 + MCP + ask（SSE 实时）
 
   【Agent 层】
   agentbd engines                               列出已注册引擎
@@ -405,6 +536,8 @@ async function main(): Promise<void> {
       return cmdServices(flags);
     case 'mcp':
       return cmdMcp(flags);
+    case 'serve':
+      return cmdServe(flags);
     default:
       console.log(HELP);
   }
