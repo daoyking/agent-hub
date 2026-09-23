@@ -36,8 +36,9 @@ import {
 } from './services.ts';
 import type { Health, ProbeLevel } from './services.ts';
 import { scanMcp, toAcpMcpServers, MCP_SOURCES } from './mcphub.ts';
-import { probeMcpEntry } from './mcpprobe.ts';
+import { probeMcpEntriesCached } from './mcpprobe.ts';
 import type { McpProbeResult } from './mcpprobe.ts';
+import { syncIndex, dbInfo, queryToolStats } from './store.ts';
 import { addMcp, removeMcp } from './mcpwrite.ts';
 import type { McpWriteSpec } from './mcpwrite.ts';
 import { startServer } from './server.ts';
@@ -57,6 +58,7 @@ type Flags = {
   host: string;
   resume?: string;
   noBudget: boolean;
+  refresh: boolean;
   _: string[];
 };
 
@@ -74,6 +76,7 @@ function parseArgs(argv: string[]): Flags {
     port: 7787,
     host: '127.0.0.1',
     noBudget: false,
+    refresh: false,
     _: [],
   };
   for (let i = 0; i < argv.length; i++) {
@@ -96,6 +99,7 @@ function parseArgs(argv: string[]): Flags {
     else if (a === '--port') flags.port = Number(argv[++i]);
     else if (a === '--host') flags.host = argv[++i]!;
     else if (a === '--no-budget') flags.noBudget = true;
+    else if (a === '--refresh') flags.refresh = true;
     else if (a === '--resume') {
       const v = argv[i + 1];
       if (v && !v.startsWith('-')) { flags.resume = v; i++; }
@@ -300,7 +304,30 @@ async function cmdSessions(): Promise<void> {
   console.log('\n续接: agentbd ask <engine> <prompt> --resume last（或上面的 sessionId）');
 }
 
-async function cmdStats(): Promise<void> {
+async function cmdStats(flags: Flags): Promise<void> {
+  // —— 工具级调用统计（SQLite events 表 GROUP BY；含引擎自己接的 MCP 工具）——
+  if (flags._[0] === 'tools') {
+    await syncIndex();
+    const rows = await queryToolStats();
+    if (rows === null) {
+      console.error('SQLite 不可用（需要 Node ≥ 22.13），无法做工具级统计');
+      process.exitCode = 1;
+      return;
+    }
+    if (rows.length === 0) {
+      console.log('(还没有 tool.call 事件——先跑几轮 ask)');
+      return;
+    }
+    console.log('工具级调用统计（按调用次数排序）\n');
+    console.log('engine      工具                           调用   最近调用');
+    for (const r of rows.slice(0, 50)) {
+      console.log(
+        `${r.engine.padEnd(11)} ${r.tool.padEnd(30)} ${String(r.calls).padStart(5)}  ${r.lastTs ? new Date(r.lastTs).toLocaleString() : '-'}`,
+      );
+    }
+    return;
+  }
+
   const s = await aggregateStats();
   if (s.scanned === 0) {
     console.log('(还没有 transcript)');
@@ -313,6 +340,37 @@ async function cmdStats(): Promise<void> {
       `${r.engine.padEnd(11)} ${String(r.turns).padStart(4)} ${String(r.tokens).padStart(12)} $${r.costUsd.toFixed(4).padStart(9)}  ${r.lastTs ? new Date(r.lastTs).toLocaleString() : '-'}`,
     );
   }
+  console.log('\n工具级: agentbd stats tools');
+}
+
+async function cmdDb(flags: Flags): Promise<void> {
+  const sub = flags._[0] ?? 'info';
+  if (sub === 'import') {
+    // 显式全量导入（幂等）；日常读路径会自动增量索引，这条用于迁移验收
+    const r = await syncIndex();
+    const info = await dbInfo();
+    console.log(
+      `索引完成：新增 ${r.indexed} / 共 ${r.total} 个 jsonl → turns=${info.turns} events=${info.events}（${info.file}）`,
+    );
+    return;
+  }
+  if (sub !== 'info') {
+    console.error(`未知子命令: ${sub}（可用: info / import）`);
+    process.exitCode = 2;
+    return;
+  }
+  const info = await dbInfo();
+  if (flags.json) {
+    process.stdout.write(JSON.stringify(info, null, 2) + '\n');
+    return;
+  }
+  console.log(`SQLite 索引库: ${info.file}`);
+  if (!info.available) {
+    console.log('状态: 不可用（node:sqlite 需要 Node ≥ 22.13；读路径已自动降级 jsonl 扫描）');
+    return;
+  }
+  console.log(`状态: 可用 · turns=${info.turns} · events=${info.events} · ${(info.bytes / 1024).toFixed(1)} KiB`);
+  console.log('（jsonl 仍是写入源，本库是读模型；agentbd db import 可手动全量重建索引）');
 }
 
 async function cmdBudget(args: string[]): Promise<void> {
@@ -466,7 +524,7 @@ async function cmdMcp(flags: Flags): Promise<void> {
     );
     let entries = await scanMcp(probed);
     if (arg) entries = entries.filter((e) => e.name === arg);
-    const results: McpProbeResult[] = await Promise.all(entries.map((e) => probeMcpEntry(e)));
+    const results: McpProbeResult[] = await probeMcpEntriesCached(entries, { refresh: flags.refresh });
     if (flags.json) {
       process.stdout.write(JSON.stringify({ at: Date.now(), results }, null, 2) + '\n');
       return;
@@ -479,7 +537,7 @@ async function cmdMcp(flags: Flags): Promise<void> {
     for (const r of results) {
       const icon = r.ok ? '\x1b[32m✔' : r.skipped ? '\x1b[2m⊘' : '\x1b[31m✘';
       const tools = r.tools ?? [];
-      console.log(`${icon} ${r.name.padEnd(20)} ${String(r.ms).padStart(6)}ms  ${tools.length} tools\x1b[0m`);
+      console.log(`${icon} ${r.name.padEnd(20)} ${String(r.ms).padStart(6)}ms  ${tools.length} tools${r.cached ? '（缓存）' : ''}\x1b[0m`);
       if (r.ok && tools.length) console.log(`      ${tools.slice(0, 8).join(', ')}${tools.length > 8 ? ' …' : ''}`);
       if (r.skipped) console.log(`      (${r.error})`);
       else if (!r.ok) console.log(`      ${r.error}`);
@@ -603,7 +661,7 @@ const HELP = `agentbd 0.1.0 —— 多 agent + 本地服务 统一总线（P0 �
 
   【MCP 接线】
   agentbd mcp [--json]                          统一 MCP 视图（跨所有 agent 去重 + 关联本地服务）
-  agentbd mcp probe [name] [--json]             工具级探针（initialize → tools/list，stdio/http）
+  agentbd mcp probe [name] [--json] [--refresh] 工具级探针（结果缓存 2min，--refresh 强制真探）
   agentbd mcp add <name> --url <url> [--agents a,b]   写回各 agent 配置（先备份 .agentbd.bak）
   agentbd mcp add <name> <command...> [--agents a,b]  同上（stdio 型）
   agentbd mcp remove <name> [--agents a,b]      从各 agent 配置移除
@@ -621,7 +679,9 @@ const HELP = `agentbd 0.1.0 —— 多 agent + 本地服务 统一总线（P0 �
         --resume [last|<sessionId>]           续接已有会话（session/load 恢复，cwd 取原会话）
         --no-budget                           临时跳过预算护栏
   agentbd sessions                              历史 transcript
-  agentbd stats                                 用量看板（轮次/tokens/成本，按引擎聚合）
+  agentbd stats                                 用量看板（轮次/tokens/成本，按引擎聚合，SQLite 索引）
+  agentbd stats tools                           工具级调用统计（tool.call 事件 GROUP BY）
+  agentbd db info / db import                   SQLite 索引库状态 / 手动全量重建索引（幂等）
   agentbd budget                                预算护栏：查看限额 + 今日/本月用量
   agentbd budget set dailyTokens=100000 dailyUsd=5 [monthlyTokens=… warnAt=0.8]
   agentbd budget clear                          清空限额
@@ -643,9 +703,11 @@ async function main(): Promise<void> {
     case 'sessions':
       return cmdSessions();
     case 'stats':
-      return cmdStats();
+      return cmdStats(flags);
     case 'budget':
       return cmdBudget(flags._);
+    case 'db':
+      return cmdDb(flags);
     case 'services':
       return cmdServices(flags);
     case 'mcp':

@@ -19,6 +19,7 @@ import { decide } from './policy.ts';
 import type { ApprovalMode } from './policy.ts';
 import { createTranscript } from './sessions.ts';
 import { checkBudget } from './budget.ts';
+import { indexTranscriptFile } from './store.ts';
 
 export type EngineProfile = {
   protocolVersion: number;
@@ -235,6 +236,9 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
       await promptPromise.catch(() => undefined);
       if (timer) clearTimeout(timer);
       session.dispose();
+
+      // 回合落库索引（P1 SQLite 读模型）；失败绝不影响回合本身
+      if (transcript) await indexTranscriptFile(transcript.file).catch(() => {});
 
       return {
         engine: opts.spec.id,

@@ -11,6 +11,7 @@
 
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline/promises';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import type { McpEntry } from './mcphub.ts';
@@ -23,6 +24,8 @@ export type McpProbeResult = {
   protocolVersion?: string;
   error?: string;
   skipped?: boolean;
+  /** true = 来自 tools/list 结果缓存（P1，TTL 2min，--refresh 绕过） */
+  cached?: boolean;
 };
 
 const PROTOCOL = '2025-06-18';
@@ -203,4 +206,62 @@ export function probeMcpEntry(e: McpEntry, timeoutMs = 20000): Promise<McpProbeR
 
 export async function probeMcpAll(entries: McpEntry[], timeoutMs = 20000): Promise<McpProbeResult[]> {
   return Promise.all(entries.map((e) => probeMcpEntry(e, timeoutMs)));
+}
+
+/* ------------------------- tools/list 结果缓存（P1） ------------------------- */
+
+const CACHE_FILE = path.join(homedir(), '.agentbd', 'mcp-probe-cache.json');
+const CACHE_TTL_MS = 120_000;
+
+type ProbeCache = Record<string, { at: number; r: McpProbeResult }>;
+
+async function readCache(): Promise<ProbeCache> {
+  try {
+    return JSON.parse(await readFile(CACHE_FILE, 'utf8')) as ProbeCache;
+  } catch {
+    return {};
+  }
+}
+
+async function writeCache(c: ProbeCache): Promise<void> {
+  await mkdir(path.dirname(CACHE_FILE), { recursive: true });
+  const tmp = `${CACHE_FILE}.tmp`;
+  await writeFile(tmp, JSON.stringify(c), 'utf8');
+  await rename(tmp, CACHE_FILE); // 原子写，与 repo 其他状态文件同规
+}
+
+const cacheKey = (e: McpEntry): string => `${e.transport}:${e.target}`;
+
+/**
+ * 带缓存的批量探针：成功的 tools/list 结果缓存 2min（服务没重启工具表不会变），
+ * 失败结果不缓存（下次立即重试）。`refresh` 强制全量真探。
+ */
+export async function probeMcpEntriesCached(
+  entries: McpEntry[],
+  opts: { refresh?: boolean; timeoutMs?: number } = {},
+): Promise<McpProbeResult[]> {
+  const cache = opts.refresh ? {} : await readCache();
+  const now = Date.now();
+  const results: McpProbeResult[] = [];
+  const misses: McpEntry[] = [];
+  for (const e of entries) {
+    const hit = cache[cacheKey(e)];
+    if (hit && hit.r.ok && now - hit.at < CACHE_TTL_MS) {
+      results.push({ ...hit.r, cached: true });
+    } else {
+      misses.push(e);
+    }
+  }
+  const fresh = await Promise.all(misses.map((e) => probeMcpEntry(e, opts.timeoutMs ?? 20000)));
+  for (const r of fresh) {
+    results.push(r);
+    if (r.ok) {
+      const e = misses.find((m) => m.name === r.name);
+      if (e) cache[cacheKey(e)] = { at: now, r };
+    }
+  }
+  await writeCache(cache).catch(() => {});
+  // 保持入参顺序
+  const byName = new Map(results.map((r) => [r.name, r]));
+  return entries.map((e) => byName.get(e.name)!).filter(Boolean);
 }

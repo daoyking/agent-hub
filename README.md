@@ -36,7 +36,7 @@ node src/cli.ts ask claude --with-mcp "..."  # 把 MCP Hub 清单注入该引擎
 | `src/normalize.ts` | **L2 归一化** | ACP `session/update` → 统一事件模型；工具风险分级 |
 | `src/policy.ts` | L2 审批 | auto / guard / deny 三模式，统一审批语义 |
 | `src/bus.ts` | L2 核心 | 会话生命周期：initialize → session/new → prompt → 事件流 → usage |
-| `src/sessions.ts` | L2 持久化 | JSONL transcript（P1 迁 SQLite 可直接导入） |
+| `src/sessions.ts` | L2 持久化 | JSONL transcript（写入源）+ SQLite 读模型（`src/store.ts`） |
 | `src/services.ts` | **服务层** | launchd/lsof 发现 + L1/L2/L3 三级探针 + 假活判定 + 生命周期 + 健康缓存 |
 | `src/mcphub.ts` | **MCP Hub** | 扫 17 个 agent 的 MCP 配置 → 归一去重 → 关联服务灯 → 转 `acp.McpServer[]` |
 | `src/cli.ts` | L3 外壳（P0 形态） | 命令 + 事件渲染（P1 换成 Web/Tauri 组件） |
@@ -226,6 +226,30 @@ $ agentbd ask … --no-budget      → 临时跳过
 - 口径：tokens 全引擎有效；costUsd 只对回传成本的引擎（claude）累计——agnes 要限请用 tokens。
 - E2E：`dailyTokens=1` → ask 被拦截（exit=1）→ `budget clear` → ask 恢复（真实 OK 回合）。
 
+### 13. SQLite 索引层 + 工具级统计 + probe 缓存（2026-09-23）
+
+```
+$ agentbd db import      → 新增 29 / 共 29 个 jsonl → turns=29 events=369（幂等，重跑新增 0）
+$ agentbd stats          → SQL 聚合全量（不再受 500 文件截断）
+$ agentbd stats tools    → tool.call 事件 GROUP BY：engine × 工具 × 调用次数
+$ agentbd mcp probe      → 第二次 0ms（缓存）；--refresh 强制真探
+```
+
+- **jsonl 仍是写入源**（append-only 崩溃安全），`~/.agentbd/agentbd.db` 只是读模型/索引：
+  写路径一行未改，回合结束 `indexTranscriptFile` 增量入库；读路径（sessions/stats/budget）
+  每次先 `syncIndex()`（SELECT file 比对，只解析新文件）再 SQL 查询——索引永远跟得上写。
+- **降级设计**：`node:sqlite` 动态 import，Node < 22.13 或索引失败时自动回退 jsonl 扫描，
+  功能不缺；索引失败绝不影响 ask 主流程。
+- `stats tools` 顺带完成了「MCP 调用统计」的可达部分：引擎自己接的 MCP 工具调用
+  会以 tool.call 事件经过总线，全部落 events 表可聚合。
+- probe 缓存：成功的 tools/list 缓存 2min（`~/.agentbd/mcp-probe-cache.json`，原子写），
+  **失败结果不缓存**（立即重试）；`--refresh` 绕过。
+- 两项原计划经实测**不适用**（勿再排期）：
+  - trae dir 写回：`~/.trae-cn/mcps/s_*` 是 workspace 级**工具缓存**（Exec.json 工具描述），
+    不是 MCP server 配置——没有可写标的，dir 型源维持拒写；
+  - `~/.omh` 对接：manifest.json 是 oh-my-hermes 的 skill profile 元数据、targets.json 是
+    hermes target 注册表，**没有带端口的服务清单**，无可对接内容。
+
 ## 安全边界（P0 已实现）
 
 - `AGENTBD_DEPTH` 守卫：**禁止 agent 套 agent**（Agnes/WorkBuddy 内部也会拉起别的 agent，会翻倍消耗）。
@@ -239,7 +263,10 @@ $ agentbd ask … --no-budget      → 临时跳过
 
 | 文件 | 内容 |
 |---|---|
-| `sessions/*.jsonl` | 每次 `ask` 的统一事件 transcript（含用量/审批留痕） |
+| `sessions/*.jsonl` | 每次 `ask` 的统一事件 transcript（含用量/审批留痕）——**写入源** |
+| `agentbd.db` | SQLite 读模型/索引（turns + events 表，由 jsonl 增量构建，删了可随时 `db import` 重建） |
+| `budget.json` | 预算限额（dailyUsd/monthlyUsd/dailyTokens/monthlyTokens/warnAt） |
+| `mcp-probe-cache.json` | MCP tools/list 探针结果缓存（TTL 2min，只缓存成功结果） |
 | `health.json` | 服务健康缓存，带 `at` 时间戳，聚合灯取最老一条的年龄 |
 | `services.json` | 服务清单（`services init` 生成骨架 + 手工校准，含 L2/L3 探针声明） |
 
@@ -251,6 +278,7 @@ $ agentbd ask … --no-budget      → 临时跳过
 
 1. ~~等 AgnesCode GUI 同步 key~~ → 已完成（custom provider + requiresAuth，见 §9）。
 2. Web 面板加 Tauri 壳；~~审批中心~~ → 已完成（§11）。
-3. MCP Hub 继续补全：dir 型源（trae）写回、per-MCP tool 级缓存与调用统计。
-4. transcript 迁 SQLite；~~会话恢复（session/load）~~ → 已完成（§10）；~~用量看板加预算护栏~~ → 已完成（§12）；
-   对接 `~/.omh`（oh-my-hermes）已有服务清单。
+3. ~~MCP Hub 补全~~ → 已完成（§13）：tool 级调用统计（`stats tools`）+ tools/list 结果缓存；
+   trae dir 写回已查明不适用（那是工具缓存目录不是 MCP 配置）。
+4. ~~transcript 迁 SQLite~~ → 已完成（§13，jsonl 源 + SQLite 读模型）；~~会话恢复~~ → 已完成（§10）；
+   ~~预算护栏~~ → 已完成（§12）；~~对接 `~/.omh`~~ → 已查明无服务清单，不对接（§13）。

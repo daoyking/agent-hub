@@ -10,6 +10,7 @@ import { appendFile, mkdir, readdir, readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import type { NormalizedEvent } from './normalize.ts';
+import { syncIndex, queryTranscripts, queryStats } from './store.ts';
 
 export const ROOT = path.join(homedir(), '.agentbd');
 export const SESSION_DIR = path.join(ROOT, 'sessions');
@@ -48,6 +49,14 @@ export async function createTranscript(meta: TranscriptMeta): Promise<Transcript
 export async function listTranscripts(
   limit = 20,
 ): Promise<Array<{ file: string; engine: string; sessionId: string; prompt: string; cwd: string; ts: string }>> {
+  // P1：优先走 SQLite 索引（syncIndex 增量补齐新文件）；store 不可用才回退 jsonl 扫描
+  try {
+    await syncIndex();
+    const rows = await queryTranscripts(limit);
+    if (rows !== null) return rows;
+  } catch {
+    /* 降级到 jsonl 扫描 */
+  }
   try {
     const files = (await readdir(SESSION_DIR)).filter((f) => f.endsWith('.jsonl')).sort().reverse().slice(0, limit);
     const out = [];
@@ -93,6 +102,21 @@ export type Stats = { total: StatsTotals; byEngine: StatsEngineRow[]; scanned: n
  * `since`：只统计 meta.ts ≥ since 的会话（预算护栏的"今日/本月"窗口用）。
  */
 export async function aggregateStats(limit = 500, since?: number): Promise<Stats> {
+  // P1：SQLite 索引路径（不受 limit 截断——SQL 聚合全量）；失败回退 jsonl 扫描
+  try {
+    await syncIndex();
+    const s = await queryStats(since);
+    if (s !== null) {
+      const total: StatsTotals = {
+        turns: s.byEngine.reduce((n, r) => n + r.turns, 0),
+        tokens: s.byEngine.reduce((n, r) => n + r.tokens, 0),
+        costUsd: s.byEngine.reduce((n, r) => n + r.costUsd, 0),
+      };
+      return { total, byEngine: s.byEngine, scanned: s.scanned, updatedAt: Date.now() };
+    }
+  } catch {
+    /* 降级到 jsonl 扫描 */
+  }
   const byEngine = new Map<string, StatsEngineRow>();
   let scanned = 0;
   let files: string[] = [];
