@@ -132,9 +132,7 @@ stdout: GOOSED_CERT_FINGERPRINT=<sha256>   ← 抓下来 pin，防本地代理�
 - `doctor agnes` → `✔ PASS agnes 125ms · agnes 1.62.6`（全量 **6/6**）。
 - 踩坑实录：① `ws` 默认发 binary frame，server 直接忽略（`Ignoring binary message`）→ 必须 `.toString()`；
   ② 不注入 `AGNES_DEFAULT_PROVIDER/MODEL` 时会话建得起来但 prompt 报 `Provider not set`；
-  ③ 真实回合还差 `AGNES_AI_API_KEY`——**全机持久化位置（服务端 config/keyring/config.yaml）均为 null**，
-  desktop 只在内存里注入登录 accessToken。→ 打开 AgnesCode GUI 登录一次即可同步写入，之后 `ask agnes` 即通；
-  适配器已对这个错误给出可操作提示（不用翻 stderr 猜）。
+  ③ ~~真实回合还差 `AGNES_AI_API_KEY`~~ → 已破，见下节「Agnes API key 接入真相」（零 env 可跑）。
 
 ### 7. MCP Hub 从"只读视图"变成可写 + 工具级探针
 
@@ -168,6 +166,52 @@ POST /api/ask {engine:"claude",prompt:"只回复两个字母：OK"} 经 SSE 收�
   面板只绑 `127.0.0.1`，不落任何新状态（transcript 仍进 `~/.agentbd/sessions/`）。
 - `src/ui.html` 原生 HTML+JS+EventSource，无打包步骤（Tauri 壳留给下一步）。
 
+### 9. Agnes API key 接入真相：自定义 provider + `requiresAuth: true`
+
+用户的 key 属 **API-hub 型**（`apihub.agnes-ai.cn/v1` → 200 模型列表；`api-agnes-code.*` → 401 `000501`，
+不是账号会话 token）。正路是注册自定义 provider：
+
+```
+ACP 扩展方法 _agnes/unstable/providers/custom/update
+  → custom_agneshub（engine=openai_compatible, apiUrl=https://apihub.agnes-ai.cn/v1, 6 个模型）
+  → 关键：必须 requiresAuth: true，否则 apiKey 被静默丢弃（apiKeySet:false）
+config.yaml active_provider: custom_agneshub（GUI 与 agentbd 同源）
+```
+
+- **零 env `ask agnes` 全通**：回复真实内容、stop=end_turn、transcript 落盘、用量可读。
+- 弯路清单（勿重复）：config.yaml 直写不进运行时；`AGNES_AI_API_KEY`/`AGNES_API_URL`/`OPENAI_API_KEY`
+  env 注入对 custom provider 无效；`config/save` 拒绝任意字段名；`OPENAI_CUSTOM_HEADERS` 能存进
+  secret store 但运行时不合并；`env_vars[].default` 不进请求，且写坏类型会让 provider 加载失败。
+- **事故教训**：custom provider JSON（`~/.agnes/config/custom_providers/*.json`）只能由 ACP 方法改——
+  手工 `JSON.parse→stringify` 重写曾与服务端写入竞态，把刚注册的 apiKey 状态抹掉（全线 401），
+  重新 `custom/update` 后恢复。
+
+### 10. 会话恢复：`ask --resume`（session/load）
+
+```
+$ agentbd ask agnes '记住暗号：ORCA-77。只回复：已记住'      → 已记住   (session 20260923_18)
+$ agentbd ask agnes '刚才的暗号？' --resume last             → ORCA-77  (同 session，跨进程恢复)
+```
+
+- `--resume last|<sessionId>`：从本地 transcript 解析目标（`sessions.resolveResume`），cwd 以原会话为准；
+  引擎不匹配直接报错（恢复不跨引擎）。
+- bus 层按能力选路：`caps.loadSession` → `session/load`（agnes），
+  否则 `caps.sessionCapabilities.resume` → `session/resume`（qoder）；都没有则报错。
+- `attachSession` 在 sdk d.ts 里标 private 但 JS 公开；load/resume 响应体无 sessionId，手动并入。
+
+### 11. Web 审批中心 + 用量看板
+
+```
+POST /api/ask {engine, prompt, approval:"guard"}  → 高风险工具 → SSE approval.request {id, tool, risk}
+POST /api/approve {id, allow}                     → {decided:true} → 引擎继续 → ask.done
+GET  /api/stats / agentbd stats                   → 轮次/tokens/成本，按引擎聚合（扫 transcript 末条 usage）
+```
+
+- E2E：guard 模式让 claude 写 `/tmp` 文件 → SSE 收到 `approval.request(a1, Bash, high)` →
+  `approve allow` → 文件落盘、`ask.done`；120s 未决自动拒绝（`approval.timeout`）。
+- UI：审批条内嵌事件流（允许/拒绝按钮）、侧栏「用量」面板、ask 表单带续接输入框。
+- `agentbd stats`：27 transcripts · 17.3 万 tokens · $0.47（claude 计费，agnes 未返回成本）。
+
 ## 安全边界（P0 已实现）
 
 - `AGENTBD_DEPTH` 守卫：**禁止 agent 套 agent**（Agnes/WorkBuddy 内部也会拉起别的 agent，会翻倍消耗）。
@@ -191,8 +235,8 @@ POST /api/ask {engine:"claude",prompt:"只回复两个字母：OK"} 经 SSE 收�
 
 ## 下一步
 
-1. 等 AgnesCode GUI 同步 `AGNES_AI_API_KEY` 后端到端验 `ask agnes`（transport/doctor 已完成，只差 key）。
-2. Web 面板加 Tauri 壳 + 审批中心（guard 模式的 y/N 目前只在 CLI 里交互）。
+1. ~~等 AgnesCode GUI 同步 key~~ → 已完成（custom provider + requiresAuth，见 §9）。
+2. Web 面板加 Tauri 壳；~~审批中心~~ → 已完成（§11）。
 3. MCP Hub 继续补全：dir 型源（trae）写回、per-MCP tool 级缓存与调用统计。
-4. transcript 迁 SQLite + 会话恢复（`session/load`，引擎均支持）；用量/成本看板 + 预算护栏；
+4. transcript 迁 SQLite；~~会话恢复（session/load）~~ → 已完成（§10）；用量看板加预算护栏；
    对接 `~/.omh`（oh-my-hermes）已有服务清单。

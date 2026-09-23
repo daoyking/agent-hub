@@ -5,8 +5,10 @@
  * UI 只是把 `cli.renderEvent` 的 ANSI 行换成组件：
  *   GET  /            单页面板（src/ui.html，无构建步骤）
  *   GET  /api/state   引擎 + 服务灯 + MCP 清单（一次聚合）
- *   GET  /events      SSE：状态刷新 + ask 回合的实时事件
- *   POST /api/ask     {engine,prompt,cwd?,approval?,withMcp?} → runTurn
+ *   GET  /api/stats   用量看板（transcript 聚合：轮次/tokens/成本）
+ *   GET  /events      SSE：状态刷新 + ask 回合的实时事件 + 审批请求
+ *   POST /api/ask     {engine,prompt,cwd?,approval?,withMcp?,resume?} → runTurn
+ *   POST /api/approve {id,allow} → 解除挂起的高风险审批（guard 模式）
  *   POST /api/refresh 重新 L1 探测服务 + 重扫 MCP
  *
  * 安全边界：只绑 127.0.0.1；无鉴权（本机单用户）；不落任何新状态。
@@ -22,8 +24,10 @@ import { BUILTIN_ENGINES, findEngine } from './registry.ts';
 import { runTurn } from './bus.ts';
 import { discover, probeService, loadManifest } from './services.ts';
 import { scanMcp, toAcpMcpServers } from './mcphub.ts';
+import { resolveResume, aggregateStats } from './sessions.ts';
 import type { LocalService } from './services.ts';
 import type { NormalizedEvent } from './normalize.ts';
+import type { ApprovalRequest } from './normalize.ts';
 
 const UI_FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), 'ui.html');
 
@@ -49,6 +53,53 @@ export type ServerState = {
 };
 
 const sseClients = new Set<ServerResponse>();
+
+/**
+ * Web 审批中心（P1）：guard 模式下高风险工具挂起 → SSE 广播 →
+ * `POST /api/approve {id, allow}` 解除挂起。2 分钟无人响应按拒绝处理。
+ */
+type PendingAsk = {
+  engine: string;
+  req: ApprovalRequest;
+  resolve: (allow: boolean) => void;
+  timer: NodeJS.Timeout;
+};
+let askSeq = 0;
+const pendingAsks = new Map<string, PendingAsk>();
+
+function askWeb(engine: string, req: ApprovalRequest): Promise<boolean> {
+  return new Promise((resolve) => {
+    const id = `a${++askSeq}`;
+    const timer = setTimeout(() => {
+      pendingAsks.delete(id);
+      broadcast({ k: 'approval.timeout', id, engine });
+      resolve(false);
+    }, 120000);
+    timer.unref?.();
+    pendingAsks.set(id, {
+      engine,
+      req,
+      resolve: (allow) => {
+        clearTimeout(timer);
+        pendingAsks.delete(id);
+        resolve(allow);
+      },
+      timer,
+    });
+    broadcast({
+      k: 'approval.request',
+      id,
+      engine,
+      req: {
+        tool: req.tool,
+        kind: req.kind,
+        title: req.title,
+        risk: req.risk,
+        rawInput: req.rawInput,
+      },
+    });
+  });
+}
 
 function broadcast(payload: Record<string, unknown>): void {
   const line = `data: ${JSON.stringify(payload)}\n\n`;
@@ -124,8 +175,26 @@ async function handleAsk(body: Record<string, unknown>): Promise<void> {
     });
     return;
   }
-  const cwd = typeof body.cwd === 'string' ? body.cwd : process.cwd();
+  const cwd0 = typeof body.cwd === 'string' ? body.cwd : process.cwd();
   const approval = body.approval === 'auto' || body.approval === 'deny' ? body.approval : 'guard';
+
+  // 续接会话：resume='last' 或字面 sessionId；cwd 以原会话为准（引擎按 cwd 归档）
+  let cwd = cwd0;
+  let resume: { sessionId: string; cwd: string } | undefined;
+  if (typeof body.resume === 'string' && body.resume.trim()) {
+    const target = await resolveResume(spec.id, body.resume.trim());
+    if (!target) {
+      broadcast({ k: 'ask.error', engine: spec.id, error: `未找到可恢复的会话: ${body.resume}（先跑一轮 ask 产生 transcript）` });
+      return;
+    }
+    if (target.engine !== spec.id) {
+      broadcast({ k: 'ask.error', engine: spec.id, error: `该 session 属于 ${target.engine}，与引擎 ${spec.id} 不匹配` });
+      return;
+    }
+    resume = { sessionId: target.sessionId, cwd: target.cwd };
+    cwd = target.cwd;
+    broadcast({ k: 'notice', level: 'info', text: `恢复会话 ${target.sessionId} · cwd=${target.cwd}` });
+  }
 
   let mcpServers: acp.McpServer[] | undefined;
   if (body.withMcp === true) {
@@ -142,14 +211,16 @@ async function handleAsk(body: Record<string, unknown>): Promise<void> {
       cwd,
       prompt,
       approval,
+      resume,
       mcpServers,
+      onAsk: (req) => askWeb(spec.id, req),
       onEvent: (ev: NormalizedEvent) => broadcast({ k: 'ask.event', engine: spec.id, ev }),
     });
     broadcast({ k: 'ask.done', engine: spec.id, result });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    const hint = /Provider not set|AGNES_AI_API_KEY/.test(msg)
-      ? 'agnes 缺 AGNES_AI_API_KEY：打开 AgnesCode GUI（登录态会同步 key）后重试'
+    const hint = /Provider not set/.test(msg)
+      ? 'agnes provider 未就绪：检查 ~/.agnes/config/config.yaml 的 active_provider 与 custom provider（README「agnes 接入」）'
       : '';
     broadcast({ k: 'ask.error', engine: spec.id, error: hint ? `${msg}\n${hint}` : msg });
   }
@@ -182,6 +253,20 @@ export async function startServer(opts: {
           const body = await readBody(req);
           json(res, 202, { accepted: true });
           void handleAsk(body);
+        } else if (req.method === 'POST' && url.pathname === '/api/approve') {
+          const body = await readBody(req);
+          const id = String(body.id ?? '');
+          const pending = pendingAsks.get(id);
+          if (!pending) {
+            json(res, 404, { error: `没有挂起的审批: ${id}` });
+            return;
+          }
+          const allow = body.allow === true;
+          pending.resolve(allow);
+          json(res, 200, { decided: true, allow });
+          broadcast({ k: 'approval.decided', id, engine: pending.engine, allow });
+        } else if (req.method === 'GET' && url.pathname === '/api/stats') {
+          json(res, 200, await aggregateStats());
         } else if (req.method === 'POST' && url.pathname === '/api/refresh') {
           const state = await gatherState();
           json(res, 200, state);

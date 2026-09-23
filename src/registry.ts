@@ -7,7 +7,8 @@
  *  - 用户可用 ~/.agentbd/engines.json 覆盖/追加（对应 acpx 的 config.json 思路）。
  */
 
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -127,16 +128,41 @@ export const BUILTIN_ENGINES: EngineSpec[] = [
       path: '/acp',
       fingerprintPrefix: 'GOOSED_CERT_FINGERPRINT=',
     },
-    authHint: '复用 ~/.agnes/config/config.yaml 的 active_provider；缺失先在 Agnes GUI 里配好',
+    authHint: 'provider/model 与 GUI 同源（~/.agnes/config/config.yaml 的 active_provider）；真实回合需要已配置的 provider',
     env: {
       // 实测：不注入这两个 env，session/prompt 报 "Provider not set"
-      // （desktop 启动 agnesd 时同样注入，见 app bundle 的 AGNES_DEFAULT_PROVIDER/MODEL）
-      AGNES_DEFAULT_PROVIDER: 'agnes',
-      AGNES_DEFAULT_MODEL: 'auto',
+      // （desktop 启动 agnesd 时同样注入；这里从 config.yaml 活读，用户在 GUI
+      //  里切换 provider（如自定义 apihub provider）后 agentbd 自动保持一致）
+      ...agnesDefaults(),
     },
     note: 'agnesd = goose-server 1.62.6 fork：本地 HTTPS + wss://…/acp?token=（非 stdio，实测 2026-09-23）',
   },
 ];
+
+/**
+ * agnes 默认 provider/model——与 AgnesCode GUI 同源：
+ * 读 ~/.agnes/config/config.yaml 的 active_provider；若指向自定义 provider
+ * （custom_providers/*.json），模型取其 model 清单（优先 pro 档）。
+ * shell 里的 AGNES_DEFAULT_* 仍可覆盖（见 engineEnv 的合并顺序）。
+ */
+function agnesDefaults(): Record<string, string> {
+  let provider = 'agnes';
+  let model = 'auto';
+  try {
+    const yaml = readFileSync(path.join(os.homedir(), '.agnes/config/config.yaml'), 'utf8');
+    const m = yaml.match(/^active_provider:\s*(\S+)/m);
+    if (m) provider = m[1];
+  } catch { /* 无配置 → 内置 agnes */ }
+  if (provider !== 'agnes') {
+    try {
+      const file = path.join(os.homedir(), '.agnes/config/custom_providers', `${provider}.json`);
+      const j = JSON.parse(readFileSync(file, 'utf8'));
+      const names: string[] = (j.models ?? []).map((x: { name: string }) => x.name);
+      model = names.find((n) => n === 'agnes-2.5-pro') ?? names.find((n) => n.includes('-pro')) ?? names[0] ?? 'auto';
+    } catch { model = 'auto'; }
+  }
+  return { AGNES_DEFAULT_PROVIDER: provider, AGNES_DEFAULT_MODEL: model };
+}
 
 /** 供 doctor 做「环境可见性」检查：macOS GUI 进程看不到 brew 目录是经典坑 */
 export const EXTRA_PATH_DIRS = [
@@ -162,7 +188,9 @@ export function engineEnv(spec: EngineSpec): Record<string, string> {
     if (typeof v === 'string') env[k] = v;
   }
   env.PATH = buildPath();
-  return { ...env, ...(spec.env ?? {}) };
+  // spec.env 是「默认值」，shell/调用方环境可覆盖（否则用户传的
+  // AGNES_DEFAULT_PROVIDER 会被静态默认值吃掉）
+  return { ...(spec.env ?? {}), ...env };
 }
 
 export function findEngine(id: string, engines: EngineSpec[] = BUILTIN_ENGINES): EngineSpec | undefined {

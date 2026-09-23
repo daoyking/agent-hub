@@ -20,7 +20,7 @@ import { probe } from './doctor.ts';
 import { runTurn } from './bus.ts';
 import type { ApprovalMode } from './policy.ts';
 import type { ApprovalRequest, NormalizedEvent } from './normalize.ts';
-import { listTranscripts } from './sessions.ts';
+import { listTranscripts, resolveResume, aggregateStats } from './sessions.ts';
 import {
   discover,
   probeService,
@@ -53,6 +53,7 @@ type Flags = {
   url?: string;
   port: number;
   host: string;
+  resume?: string;
   _: string[];
 };
 
@@ -90,7 +91,11 @@ function parseArgs(argv: string[]): Flags {
     else if (a === '--url') flags.url = argv[++i];
     else if (a === '--port') flags.port = Number(argv[++i]);
     else if (a === '--host') flags.host = argv[++i]!;
-    else flags._.push(a);
+    else if (a === '--resume') {
+      const v = argv[i + 1];
+      if (v && !v.startsWith('-')) { flags.resume = v; i++; }
+      else flags.resume = 'last';
+    } else flags._.push(a);
   }
   return flags;
 }
@@ -205,6 +210,28 @@ async function cmdAsk(flags: Flags): Promise<void> {
   }
 
   const interactive = flags.approval === 'guard' && process.stdin.isTTY === true;
+
+  // 续接会话（P1 session/load）：cwd 以原会话为准，恢复目标来自 transcript
+  let resume: { sessionId: string; cwd: string } | undefined;
+  if (flags.resume) {
+    const target = await resolveResume(spec.id, flags.resume);
+    if (!target) {
+      console.error(`未找到可恢复的会话: ${flags.resume}（用 \`agentbd sessions\` 查看，或先跑一轮 ask）`);
+      process.exitCode = 2;
+      return;
+    }
+    if (target.engine !== spec.id) {
+      console.error(`该 session 属于 ${target.engine}，与引擎 ${spec.id} 不匹配（恢复不能跨引擎）`);
+      process.exitCode = 2;
+      return;
+    }
+    resume = { sessionId: target.sessionId, cwd: target.cwd };
+    if (!flags.json && flags.cwd !== target.cwd) {
+      process.stderr.write(`\x1b[2m[恢复] cwd 以原会话为准: ${target.cwd}（忽略 --cwd ${flags.cwd}）\x1b[0m\n`);
+    }
+  }
+  const cwd = resume?.cwd ?? flags.cwd;
+
   let mcpServers: acp.McpServer[] | undefined;
   if (flags.withMcp) {
     const svcs = await Promise.all((await discover()).map(async (s) => ({ ...s, health: await probeService(s, 'l1') })));
@@ -220,15 +247,17 @@ async function cmdAsk(flags: Flags): Promise<void> {
   }
   if (!flags.json) {
     process.stderr.write(
-      `\x1b[2m[${spec.id}] 会话开始 · cwd=${flags.cwd} · 审批=${flags.approval}${interactive ? '(交互)' : ''}\x1b[0m\n`,
+      `\x1b[2m[${spec.id}] 会话开始 · cwd=${cwd} · 审批=${flags.approval}${interactive ? '(交互)' : ''}` +
+        `${resume ? ` · 恢复=${resume.sessionId}` : ''}\x1b[0m\n`,
     );
   }
 
   try {
     const result = await runTurn({
       spec,
-      cwd: flags.cwd,
+      cwd,
       prompt: promptParts.join(' '),
+      resume,
       approval: interactive ? 'guard' : flags.approval,
       onAsk: interactive ? askInteractive : undefined,
       onEvent: (ev) => renderEvent(ev, { json: flags.json, quiet: flags.quiet }),
@@ -260,6 +289,22 @@ async function cmdSessions(): Promise<void> {
   for (const r of rows) {
     console.log(
       `${new Date(r.ts).toLocaleString()}  ${r.engine.padEnd(10)} ${String(r.sessionId).padEnd(38)} ${String(r.prompt).slice(0, 40)}`,
+    );
+  }
+  console.log('\n续接: agentbd ask <engine> <prompt> --resume last（或上面的 sessionId）');
+}
+
+async function cmdStats(): Promise<void> {
+  const s = await aggregateStats();
+  if (s.scanned === 0) {
+    console.log('(还没有 transcript)');
+    return;
+  }
+  console.log(`扫描 ${s.scanned} 个 transcript · 共 ${s.total.turns} 轮 · ${s.total.tokens} tokens · $${s.total.costUsd.toFixed(4)}\n`);
+  console.log('engine      轮次     tokens        成本        最近活动');
+  for (const r of s.byEngine) {
+    console.log(
+      `${r.engine.padEnd(11)} ${String(r.turns).padStart(4)} ${String(r.tokens).padStart(12)} $${r.costUsd.toFixed(4).padStart(9)}  ${r.lastTs ? new Date(r.lastTs).toLocaleString() : '-'}`,
     );
   }
 }
@@ -473,8 +518,9 @@ async function cmdServe(flags: Flags): Promise<void> {
     const { url, server } = await startServer({ port: flags.port, host: flags.host });
     console.log(`agentbd 面板已启动: ${url}`);
     console.log('  GET  /            单页面板（引擎 + 服务灯 + MCP）');
-    console.log('  GET  /events      SSE 事件流');
-    console.log('  GET  /api/state   聚合状态   POST /api/ask {engine,prompt,withMcp}');
+    console.log('  GET  /events      SSE 事件流（含审批请求）');
+    console.log('  GET  /api/state   聚合状态   POST /api/ask {engine,prompt,withMcp,resume}');
+    console.log('  GET  /api/stats   用量看板   POST /api/approve {id,allow}  审批');
     console.log('  Ctrl+C 退出');
     const shutdown = () => {
       server.close(() => process.exit(0));
@@ -507,6 +553,7 @@ const HELP = `agentbd 0.1.0 —— 多 agent + 本地服务 统一总线（P0 �
 
   【Web 面板（P1）】
   agentbd serve [--port 7787] [--host 127.0.0.1]       本地面板：服务灯 + MCP + ask（SSE 实时）
+                                                       guard 高风险 → 页面内审批（/api/approve）
 
   【Agent 层】
   agentbd engines                               列出已注册引擎
@@ -514,7 +561,9 @@ const HELP = `agentbd 0.1.0 —— 多 agent + 本地服务 统一总线（P0 �
   agentbd ask <engine> <prompt...>              单轮任务（统一事件流）
         --cwd DIR / --guard|--auto|--deny / --json / --timeout N
         --with-mcp                            把 MCP Hub 的清单注入该引擎会话
+        --resume [last|<sessionId>]           续接已有会话（session/load 恢复，cwd 取原会话）
   agentbd sessions                              历史 transcript
+  agentbd stats                                 用量看板（轮次/tokens/成本，按引擎聚合）
 
 引擎: ${BUILTIN_ENGINES.map((e) => e.id).join(', ')}
 清单: ${SERVICES_FILE}`;
@@ -532,6 +581,8 @@ async function main(): Promise<void> {
       return cmdAsk(flags);
     case 'sessions':
       return cmdSessions();
+    case 'stats':
+      return cmdStats();
     case 'services':
       return cmdServices(flags);
     case 'mcp':

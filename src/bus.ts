@@ -53,6 +53,11 @@ export type RunTurnOptions = {
   timeoutMs?: number;
   /** false = 不落盘（doctor 用） */
   persist?: boolean;
+  /**
+   * 续接已有会话（P1 的 session/load 恢复）。
+   * cwd 必须是原会话的 cwd（引擎按 cwd 归档）；由 resolveResume() 解析后传入。
+   */
+  resume?: { sessionId: string; cwd: string };
 };
 
 /** 禁止 agent 套 agent：Agnes/WorkBuddy 自身也会拉起别的 agent，会翻倍消耗 */
@@ -137,8 +142,41 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
         authMethods: (init.authMethods ?? []).map((m) => ({ id: m.id, name: m.name })),
       };
 
-      // ② 建会话
-      const session = await ctx.buildSession({ cwd: opts.cwd, mcpServers: opts.mcpServers ?? [] }).start();
+      // ② 建会话：new（默认） / load（恢复，重放历史） / resume（恢复，不重放）
+      //   attachSession 在 d.ts 标 private 但 JS 层公开；load/resume 的响应体不带
+      //   sessionId（schema 只有 modes/configOptions），必须手动并进来供路由与 prompt 使用。
+      type AttachCtx = { attachSession: (resp: unknown) => acp.ActiveSession };
+      let session: acp.ActiveSession;
+      if (opts.resume) {
+        const caps = profile.capabilities as {
+          loadSession?: boolean;
+          sessionCapabilities?: Record<string, unknown>;
+        };
+        const resumeParams = {
+          sessionId: opts.resume.sessionId,
+          cwd: opts.cwd,
+          mcpServers: opts.mcpServers ?? [],
+        };
+        if (caps.loadSession === true) {
+          const resp = await ctx.request('session/load', resumeParams);
+          session = (ctx as unknown as AttachCtx).attachSession({
+            sessionId: opts.resume.sessionId,
+            ...(resp as Record<string, unknown>),
+          });
+        } else if (caps.sessionCapabilities?.resume === true) {
+          const resp = await ctx.request('session/resume', resumeParams);
+          session = (ctx as unknown as AttachCtx).attachSession({
+            sessionId: opts.resume.sessionId,
+            ...(resp as Record<string, unknown>),
+          });
+        } else {
+          throw new Error(
+            `${opts.spec.id} 不支持会话恢复（initialize 未声明 loadSession / session.resume 能力）`,
+          );
+        }
+      } else {
+        session = await ctx.buildSession({ cwd: opts.cwd, mcpServers: opts.mcpServers ?? [] }).start();
+      }
       const transcript =
         opts.persist === false
           ? undefined
