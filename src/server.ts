@@ -230,6 +230,14 @@ async function handleAsk(body: Record<string, unknown>): Promise<void> {
 export async function startServer(opts: {
   port: number;
   host: string;
+  /**
+   * launchd socket activation（inetdCompatibility.Wait=true）：launchd 常驻持有监听
+   * socket，首个连接到达才拉起本进程，并把监听 fd 放在 stdin（fd 0）——
+   * 本进程用 listen({fd}) 接管，而不是自己绑端口。
+   */
+  activateFd?: number;
+  /** 空闲自退：无活跃连接持续这么久就 exit(0)，launchd 会在下次连接时重新拉起 */
+  idleExitMs?: number;
 }): Promise<{ url: string; server: Server }> {
   const uiHtml = await readFile(UI_FILE, 'utf8');
   const server = createServer((req, res) => {
@@ -283,9 +291,40 @@ export async function startServer(opts: {
 
   const ping = setInterval(() => broadcast({ k: 'ping', at: Date.now() }), 25000);
   ping.unref?.();
+
+  // 空闲自退（launchd on-demand 配套）：无活跃连接持续 idleExitMs 就退出，
+  // 监听 socket 仍在 launchd 手里，下次连接会自动拉起新进程。SSE 长连接算活跃。
+  if (opts.idleExitMs && opts.idleExitMs > 0) {
+    let active = 0;
+    let lastActivity = Date.now();
+    server.on('connection', (sock) => {
+      active++;
+      lastActivity = Date.now();
+      sock.on('close', () => {
+        active--;
+        lastActivity = Date.now();
+      });
+    });
+    const idleWatch = setInterval(() => {
+      if (active === 0 && Date.now() - lastActivity >= opts.idleExitMs!) {
+        process.exit(0);
+      }
+    }, Math.min(opts.idleExitMs, 30000));
+    idleWatch.unref?.();
+  }
+
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
-    server.listen(opts.port, opts.host, () => resolve());
+    if (opts.activateFd !== undefined) {
+      server.listen({ fd: opts.activateFd }, () => resolve());
+    } else {
+      server.listen(opts.port, opts.host, () => resolve());
+    }
   });
-  return { url: `http://${opts.host}:${opts.port}`, server };
+  const addr = server.address();
+  const bound =
+    addr && typeof addr === 'object'
+      ? `http://${opts.host}:${addr.port}`
+      : `http://${opts.host}:${opts.port}`;
+  return { url: bound, server };
 }

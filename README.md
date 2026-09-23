@@ -250,6 +250,27 @@ $ agentbd mcp probe      → 第二次 0ms（缓存）；--refresh 强制真探
   - `~/.omh` 对接：manifest.json 是 oh-my-hermes 的 skill profile 元数据、targets.json 是
     hermes target 注册表，**没有带端口的服务清单**，无可对接内容。
 
+### 14. launchd 按需唤醒：`serve install`（2026-09-23）
+
+解决「面板要好用又不想养一个常驻进程」——**零常驻开销**方案：
+
+```
+$ agentbd serve install    # 写 plist + launchctl bootstrap，完成
+$ curl http://127.0.0.1:7787/api/stats   # 首个连接 → launchd 自动拉起进程 → HTTP 200
+$ agentbd serve status     # state=not running（未在跑，等待首个连接拉起）
+$ agentbd serve uninstall  # 一键还原
+```
+
+- 机制：plist 声明 `Sockets.Listeners` + `inetdCompatibility.Wait=true` →
+  **launchd 内核态持有 7787 监听 socket**，有连接才 bootstrap 本进程，
+  监听 fd 出现在 stdin（fd 0），Node `server.listen({fd:0})` 接管——纯 Node，无原生依赖。
+- **空闲自退**：无活跃连接持续 `--idle` 分钟（默认 10）自动退出，下次连接再拉起；
+  SSE 长连接算活跃，所以面板开着不会被掐，关掉浏览器 10 分钟后进程归零。
+- 实测：冷启动首请求 ~1.2s；空闲 18s（测试档）后进程退出、再连即重启 ✔。
+- 冲突保护：install 前检查端口占用，已有手动 `serve` 在跑会拒绝并提示。
+- 日志：`~/.agentbd/serve.{out,err}.log`；plist：`~/Library/LaunchAgents/ai.agentbd.serve.plist`。
+
+
 ## 安全边界（P0 已实现）
 
 - `AGENTBD_DEPTH` 守卫：**禁止 agent 套 agent**（Agnes/WorkBuddy 内部也会拉起别的 agent，会翻倍消耗）。

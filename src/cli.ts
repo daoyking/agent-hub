@@ -42,6 +42,7 @@ import { syncIndex, dbInfo, queryToolStats } from './store.ts';
 import { addMcp, removeMcp } from './mcpwrite.ts';
 import type { McpWriteSpec } from './mcpwrite.ts';
 import { startServer } from './server.ts';
+import { serveInstall, serveUninstall, serveStatus } from './serveinstall.ts';
 
 type Flags = {
   cwd: string;
@@ -59,6 +60,10 @@ type Flags = {
   resume?: string;
   noBudget: boolean;
   refresh: boolean;
+  /** launchd socket activation 传入的监听 fd（serve 内部用） */
+  fd?: number;
+  /** serve 空闲自退分钟数 */
+  idleMin: number;
   _: string[];
 };
 
@@ -77,6 +82,7 @@ function parseArgs(argv: string[]): Flags {
     host: '127.0.0.1',
     noBudget: false,
     refresh: false,
+    idleMin: 10,
     _: [],
   };
   for (let i = 0; i < argv.length; i++) {
@@ -100,6 +106,8 @@ function parseArgs(argv: string[]): Flags {
     else if (a === '--host') flags.host = argv[++i]!;
     else if (a === '--no-budget') flags.noBudget = true;
     else if (a === '--refresh') flags.refresh = true;
+    else if (a === '--fd') flags.fd = Number(argv[++i]);
+    else if (a === '--idle') flags.idleMin = Number(argv[++i]);
     else if (a === '--resume') {
       const v = argv[i + 1];
       if (v && !v.startsWith('-')) { flags.resume = v; i++; }
@@ -629,8 +637,27 @@ async function cmdMcp(flags: Flags): Promise<void> {
 }
 
 async function cmdServe(flags: Flags): Promise<void> {
+  // —— launchd 按需唤醒安装：不用时系统里没有 agentbd 进程 ——
+  const sub = flags._[0];
+  if (sub === 'install' || sub === 'uninstall' || sub === 'status') {
+    try {
+      if (sub === 'install') await serveInstall(flags.port, flags.idleMin);
+      else if (sub === 'uninstall') await serveUninstall();
+      else await serveStatus();
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exitCode = 1;
+    }
+    return;
+  }
+
   try {
-    const { url, server } = await startServer({ port: flags.port, host: flags.host });
+    const { url, server } = await startServer({
+      port: flags.port,
+      host: flags.host,
+      activateFd: flags.fd,
+      idleExitMs: flags.fd !== undefined ? flags.idleMin * 60_000 : undefined,
+    });
     console.log(`agentbd 面板已启动: ${url}`);
     console.log('  GET  /            单页面板（引擎 + 服务灯 + MCP）');
     console.log('  GET  /events      SSE 事件流（含审批请求）');
@@ -669,6 +696,9 @@ const HELP = `agentbd 0.1.0 —— 多 agent + 本地服务 统一总线（P0 �
   【Web 面板（P1）】
   agentbd serve [--port 7787] [--host 127.0.0.1]       本地面板：服务灯 + MCP + ask（SSE 实时）
                                                        guard 高风险 → 页面内审批（/api/approve）
+  agentbd serve install [--port 7787] [--idle 10]      launchd 按需唤醒：零常驻，开页面自动拉起
+  agentbd serve uninstall / status                     卸载 / 查看安装状态
+
 
   【Agent 层】
   agentbd engines                               列出已注册引擎
