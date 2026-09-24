@@ -313,10 +313,16 @@ trae dir 写回与 `~/.omh` 对接经实测不适用，明确关闭（§13）。
   `scripts/fake-acp-agent.mjs`（不接模型的受控 ACP agent，一条 prompt 打全 plan/terminal/diff）。
   面板上限 = ACP 协议全集，至此达成。
 
+- ✅ **P2-2 告警通知（2026-09-24）**：`src/notify.ts`——macOS 系统通知（osascript，零依赖）+ 可选
+  webhook 双通道，配置在 `~/.agentbd/notify.json`（`enabled`/`webhook`/`minIntervalSec`，缺文件默认开），
+  同 tag 去抖防刷屏，通知失败绝不影响业务。三个触发点：审批挂起/超时（server.ts，面板关着也知道
+  有决策在等）、预算超限拦截与近限告警（bus.ts，CLI/ serve 同源）、服务红灯迁移与恢复
+  （server.ts 2 分钟 L1 watcher，首轮建档不轰炸）。注意：launchd 按需唤醒模式下 serve 空闲退出后
+  红灯 watcher 随之停止，要持续监控请常驻 `agentbd serve`。
+
 **P2 候选**（剩余，按建议优先级）：
 
 1. **Tauri/WebView 壳**：纯分发形态（独立 App、托盘灯）。launchd 按需唤醒已解决常驻成本问题，
    壳的剩余价值 = 桌面图标 + 托盘红绿灯 + 给别人装机。
-2. **告警通知**：服务红灯 / 预算触线 / 审批挂起 → 系统通知或 webhook（面板关着也能知道）。
-3. **多机/团队维度**：共享预算池、跨机 transcript 汇总、成本归因到项目/会话。
+2. **多机/团队维度**：共享预算池、跨机 transcript 汇总、成本归因到项目/会话。
 

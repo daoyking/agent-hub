@@ -23,6 +23,7 @@ import type { ApprovalMode } from './policy.ts';
 import { createTranscript } from './sessions.ts';
 import { checkBudget } from './budget.ts';
 import { indexTranscriptFile } from './store.ts';
+import { notify } from './notify.ts';
 
 export type EngineProfile = {
   protocolVersion: number;
@@ -205,6 +206,11 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
   if (opts.budget !== 'off') {
     const st = await checkBudget();
     if (st.exceeded.length > 0) {
+      // P2-2：拦截事件也发通知（后台 serve 触发的超限，前台无人看见）
+      void notify('agentbd 预算超限', `已拦截本次调用：${st.exceeded.join('；')}`, {
+        tag: 'budget:exceeded',
+        minIntervalSec: 300,
+      });
       throw new Error(
         `预算超限，已拦截本次调用：${st.exceeded.join('；')}。` +
           `查看: agentbd budget；调整: agentbd budget set dailyTokens=…；临时跳过: --no-budget`,
@@ -212,6 +218,7 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
     }
     for (const w of st.warnings) {
       opts.onEvent?.({ k: 'notice', level: 'warn', text: `预算告警: ${w}` });
+      void notify('agentbd 预算告警', w, { tag: `budget:warn:${w.slice(0, 20)}`, minIntervalSec: 600 });
     }
   }
   const t0 = Date.now();

@@ -26,6 +26,7 @@ import { discover, probeService, loadManifest } from './services.ts';
 import { scanMcp, toAcpMcpServers } from './mcphub.ts';
 import { resolveResume, aggregateStats } from './sessions.ts';
 import { checkBudget } from './budget.ts';
+import { notify } from './notify.ts';
 import type { LocalService } from './services.ts';
 import type { NormalizedEvent } from './normalize.ts';
 import type { ApprovalRequest } from './normalize.ts';
@@ -74,6 +75,10 @@ function askWeb(engine: string, req: ApprovalRequest): Promise<boolean> {
     const timer = setTimeout(() => {
       pendingAsks.delete(id);
       broadcast({ k: 'approval.timeout', id, engine });
+      void notify('agentbd 审批超时', `${engine} · ${req.title || req.tool} · 2 分钟未响应已拒绝`, {
+        tag: `approval-timeout:${engine}`,
+        minIntervalSec: 120,
+      });
       resolve(false);
     }, 120000);
     timer.unref?.();
@@ -98,6 +103,11 @@ function askWeb(engine: string, req: ApprovalRequest): Promise<boolean> {
         risk: req.risk,
         rawInput: req.rawInput,
       },
+    });
+    // P2-2：审批挂起即通知（面板关着也能知道有决策在等），同引擎 30s 去抖
+    void notify('agentbd 审批等待', `${engine} · ${req.risk}风险 · ${req.title || req.tool}`, {
+      tag: `approval:${engine}`,
+      minIntervalSec: 30,
     });
   });
 }
@@ -291,6 +301,36 @@ export async function startServer(opts: {
 
   const ping = setInterval(() => broadcast({ k: 'ping', at: Date.now() }), 25000);
   ping.unref?.();
+
+  // P2-2 服务红灯 watcher：每 2 分钟 L1 探测一遍，灯色迁移时通知
+  // （红 = 故障，红→绿 = 恢复也报一声）。低频 + unref，不挡空闲自退。
+  // 注意：launchd 按需唤醒模式下 serve 空闲退出后 watcher 随之停止——
+  // 要持续监控请常驻运行（agentbd serve，不装 plist）。
+  const lampMem = new Map<string, string>();
+  const svcWatch = setInterval(() => {
+    void (async () => {
+      try {
+        const services = await discover();
+        for (const s of services) {
+          const h = await probeService(s, 'l1');
+          const prev = lampMem.get(s.id);
+          lampMem.set(s.id, h.lamp);
+          if (prev === undefined) continue; // 首轮只建档，不通知
+          if (h.lamp === 'red' && prev !== 'red') {
+            void notify('agentbd 服务红灯', `${s.id} · ${h.detail}`.trim(), {
+              tag: `svc:${s.id}`,
+              minIntervalSec: 300,
+            });
+          } else if (h.lamp === 'green' && prev === 'red') {
+            void notify('agentbd 服务恢复', `${s.id} 红灯转绿`, { tag: `svc:${s.id}`, minIntervalSec: 60 });
+          }
+        }
+      } catch {
+        /* watcher 失败静默，下轮再试 */
+      }
+    })();
+  }, 120000);
+  svcWatch.unref?.();
 
   // 空闲自退（launchd on-demand 配套）：无活跃连接持续 idleExitMs 就退出，
   // 监听 socket 仍在 launchd 手里，下次连接会自动拉起新进程。SSE 长连接算活跃。
