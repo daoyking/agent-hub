@@ -10,6 +10,9 @@
 
 import * as acp from '@agentclientprotocol/sdk';
 import { readFile, writeFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { launch, explainStderr } from './transport.ts';
 import type { EngineSpec } from './registry.ts';
@@ -85,6 +88,117 @@ function assertInside(root: string, target: string): void {
   }
 }
 
+/**
+ * P2：ACP terminal/* 能力——agent 的 shell 命令由客户端（我们）代跑。
+ *
+ * 实现要点：
+ *  - 每个终端一个 Map 条目：子进程 + 滚动输出缓冲 + 退出状态 + waiters；
+ *  - outputByteLimit：超限从头部截断（注意不能劈开 UTF-16 代理对）；
+ *  - guard 审批模式下 terminal/create 视同高危 execute，走同一审批管线；
+ *  - stdout/stderr 每个 chunk 发 terminal.output 事件，UI 终端卡片实时滚动；
+ *  - 回合结束（finally）兜底 SIGKILL 全部存活终端，杜绝泄漏。
+ */
+type Term = {
+  proc: ChildProcess;
+  out: string;
+  truncated: boolean;
+  limit: number;
+  exited: boolean;
+  exitCode: number | null;
+  signal: string | null;
+  waiters: Array<() => void>;
+};
+
+const TERM_DEFAULT_LIMIT = 1024 * 1024; // 1MB 滚动缓冲
+
+class TerminalRegistry {
+  private terms = new Map<string, Term>();
+
+  create(
+    params: { command: string; args?: string[]; cwd?: string; env?: Record<string, string>; outputByteLimit?: number | null },
+    onChunk: (id: string, chunk: string) => void,
+    onExit: (id: string, exitCode: number | null, signal: string | null) => void,
+  ): string {
+    const id = randomUUID();
+    // 容错：有的 agent 把整串命令塞进 command（args 为空），直接 spawn 会 ENOENT。
+    // 此时回退 shell 解释；命令执行本身已被审批管线把关，shell 不扩大风险面。
+    const args = params.args ?? [];
+    const useShell = args.length === 0 && /\s/.test(params.command.trim());
+    const proc = useShell
+      ? spawn(params.command, { shell: true, cwd: params.cwd, env: { ...process.env, ...(params.env ?? {}) }, stdio: ['ignore', 'pipe', 'pipe'] })
+      : spawn(params.command, args, { cwd: params.cwd, env: { ...process.env, ...(params.env ?? {}) }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const t: Term = {
+      proc,
+      out: '',
+      truncated: false,
+      limit: params.outputByteLimit && params.outputByteLimit > 0 ? params.outputByteLimit : TERM_DEFAULT_LIMIT,
+      exited: false,
+      exitCode: null,
+      signal: null,
+      waiters: [],
+    };
+    const append = (buf: Buffer) => {
+      const chunk = buf.toString('utf8');
+      t.out += chunk;
+      if (t.out.length > t.limit) {
+        t.out = t.out.slice(t.out.length - t.limit);
+        // 截断点不能落在代理对中间：丢掉开头孤立的后半代理
+        if (t.out.length > 0 && (t.out.charCodeAt(0) & 0xfc00) === 0xdc00) t.out = t.out.slice(1);
+        t.truncated = true;
+      }
+      onChunk(id, chunk);
+    };
+    proc.stdout?.on('data', append);
+    proc.stderr?.on('data', append);
+    proc.on('error', (err) => append(Buffer.from(`[spawn error] ${err.message}\n`)));
+    // exit 与 close 双挂：spawn 失败（ENOENT）时只有 close 没有 exit，缺一个就会挂死 wait_for_exit
+    let finished = false;
+    const finish = (code: number | null, signal: string | null) => {
+      if (finished) return;
+      finished = true;
+      t.exited = true;
+      t.exitCode = code;
+      t.signal = signal;
+      onExit(id, code, signal);
+      for (const w of t.waiters.splice(0)) w();
+    };
+    proc.on('exit', finish);
+    proc.on('close', finish);
+    this.terms.set(id, t);
+    return id;
+  }
+
+  get(id: string): Term {
+    const t = this.terms.get(id);
+    if (!t) throw new Error(`未知终端: ${id}（可能已被 release）`);
+    return t;
+  }
+
+  async waitExit(id: string): Promise<{ exitCode: number | null; signal: string | null }> {
+    const t = this.get(id);
+    if (!t.exited) await new Promise<void>((res) => t.waiters.push(res));
+    return { exitCode: t.exitCode, signal: t.signal };
+  }
+
+  kill(id: string): void {
+    const t = this.get(id);
+    if (!t.exited) t.proc.kill('SIGTERM');
+  }
+
+  release(id: string): void {
+    const t = this.terms.get(id);
+    if (!t) return;
+    if (!t.exited) t.proc.kill('SIGKILL');
+    this.terms.delete(id);
+  }
+
+  /** 回合收尾：全杀，防泄漏 */
+  disposeAll(): void {
+    for (const t of this.terms.values()) if (!t.exited) t.proc.kill('SIGKILL');
+    this.terms.clear();
+  }
+}
+
 export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
   assertNotNested();
   // 预算护栏：spawn 引擎之前拦截（超限直接拒跑；近限发 notice 告警，CLI/Web 同源可见）
@@ -107,6 +221,7 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
 
   process.env.AGENTBD_DEPTH = String(Number(process.env.AGENTBD_DEPTH ?? '0') + 1);
   const agent = await launch(opts.spec, { cwd: opts.cwd });
+  const terms = new TerminalRegistry();
 
   const app = acp
     .client({ name: 'agentbd' })
@@ -138,6 +253,63 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
       assertInside(opts.cwd, ctx.params.path);
       await writeFile(ctx.params.path, ctx.params.content, 'utf8');
       return {};
+    })
+    // ---- ACP terminal/*（P2）：agent 的 shell 命令由总线代跑并全程可视 ----
+    .onRequest('terminal/create', async (ctx) => {
+      const p = ctx.params;
+      if (p.cwd) assertInside(opts.cwd, p.cwd);
+      // 终端创建 = 任意命令执行，视同高危 execute 走审批管线（guard 弹审批，auto 放行，deny 拒绝）
+      const req: ApprovalRequest = {
+        sessionId: p.sessionId,
+        toolCallId: `terminal:${randomUUID()}`,
+        tool: 'terminal',
+        title: `$ ${p.command} ${(p.args ?? []).join(' ')}`.trim(),
+        kind: 'execute',
+        risk: 'high',
+        options: [
+          { optionId: 'allow', name: '允许一次', kind: 'allow_once' },
+          { optionId: 'reject', name: '拒绝', kind: 'reject_once' },
+        ],
+        rawInput: { command: p.command, args: p.args, cwd: p.cwd },
+      };
+      const decision = await decide(req, opts.approval, opts.onAsk);
+      approvals.push({ request: req, action: decision.action, reason: decision.reason });
+      opts.onEvent?.({
+        k: 'notice',
+        level: decision.action === 'cancel' ? 'warn' : 'info',
+        text: `终端命令${decision.action === 'cancel' ? '被拒绝' : '已批准'} · ${req.title} (${decision.reason})`,
+      });
+      if (decision.action === 'cancel') throw new Error('用户拒绝了终端命令');
+      const id = terms.create(
+        {
+          command: p.command,
+          args: p.args,
+          cwd: p.cwd ?? opts.cwd,
+          env: Object.fromEntries((p.env ?? []).map((e) => [e.name, e.value])),
+          outputByteLimit: p.outputByteLimit,
+        },
+        (tid, chunk) => opts.onEvent?.({ k: 'terminal.output', id: tid, chunk }),
+        (tid, exitCode, signal) => opts.onEvent?.({ k: 'terminal.exit', id: tid, exitCode, signal }),
+      );
+      opts.onEvent?.({ k: 'terminal.create', id, command: p.command, args: p.args ?? [], cwd: p.cwd ?? opts.cwd });
+      return { terminalId: id };
+    })
+    .onRequest('terminal/output', async (ctx) => {
+      const t = terms.get(ctx.params.terminalId);
+      return {
+        output: t.out,
+        truncated: t.truncated,
+        exitStatus: t.exited ? { exitCode: t.exitCode, signal: t.signal } : null,
+      };
+    })
+    .onRequest('terminal/wait_for_exit', async (ctx) => terms.waitExit(ctx.params.terminalId))
+    .onRequest('terminal/kill', async (ctx) => {
+      terms.kill(ctx.params.terminalId);
+      return {};
+    })
+    .onRequest('terminal/release', async (ctx) => {
+      terms.release(ctx.params.terminalId);
+      return {};
     });
 
   try {
@@ -148,8 +320,8 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
         clientInfo: { name: 'agentbd', version: '0.1.0' },
         clientCapabilities: {
           fs: { readTextFile: true, writeTextFile: true },
-          // P0 不实现 ACP 终端；诚实声明 false，而不是宣告后报错
-          terminal: false,
+          // P2：完整实现 terminal/*（create/output/wait_for_exit/kill/release，见 TerminalRegistry）
+          terminal: true,
         },
       });
       const profile: EngineProfile = {
@@ -261,6 +433,7 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
     throw new Error(`${opts.spec.id} 运行失败: ${msg}\n--- agent stderr ---\n${hint}`);
   } finally {
     process.env.AGENTBD_DEPTH = '0';
+    terms.disposeAll();
     agent.dispose();
   }
 }

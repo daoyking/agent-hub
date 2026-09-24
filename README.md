@@ -297,9 +297,26 @@ $ agentbd serve uninstall  # 一键还原
 
 ## 下一步
 
-1. ~~等 AgnesCode GUI 同步 key~~ → 已完成（custom provider + requiresAuth，见 §9）。
-2. Web 面板加 Tauri 壳；~~审批中心~~ → 已完成（§11）。
-3. ~~MCP Hub 补全~~ → 已完成（§13）：tool 级调用统计（`stats tools`）+ tools/list 结果缓存；
-   trae dir 写回已查明不适用（那是工具缓存目录不是 MCP 配置）。
-4. ~~transcript 迁 SQLite~~ → 已完成（§13，jsonl 源 + SQLite 读模型）；~~会话恢复~~ → 已完成（§10）；
-   ~~预算护栏~~ → 已完成（§12）；~~对接 `~/.omh`~~ → 已查明无服务清单，不对接（§13）。
+**P1 已收官（2026-09-23）**：清单项全部完成或查明关闭——AgnesCode 接入（§9）、会话恢复（§10）、
+审批中心（§11）、预算护栏（§12）、SQLite 索引 + tool 统计 + probe 缓存（§13）、launchd 按需唤醒（§14）、
+服务大盘治理（幽灵条目/端口笔误/裸奔 plist 清除 + 发现逻辑修复 + 进程存活探针，8 服务全绿）。
+trae dir 写回与 `~/.omh` 对接经实测不适用，明确关闭（§13）。
+
+**P2 进行中**：
+
+- ✅ **P2-1 全量 ACP（2026-09-24）**：`terminal/*` 能力面完整接入（`TerminalRegistry`：create/output/
+  wait_for_exit/kill/release，1MB 滚动缓冲 + 整串 command 的 shell 回退 + spawn 失败 close 兜底）；
+  终端创建视同高危 execute 走审批管线（guard 弹审批 / auto 放行 / deny 拦截）；stdout/stderr 经
+  总线事件实时推送。归一化层新增 `terminal.create/output/exit` 事件 + tool.call/result 携带
+  `diffs`（ACP ToolCallContent type=diff 提取）。CLI 渲染终端输出与行级微 diff（前后缀裁剪），
+  Web 面板新增终端卡片（实时滚动）、plan 时间线卡片、diff 红绿卡片。回归夹具：
+  `scripts/fake-acp-agent.mjs`（不接模型的受控 ACP agent，一条 prompt 打全 plan/terminal/diff）。
+  面板上限 = ACP 协议全集，至此达成。
+
+**P2 候选**（剩余，按建议优先级）：
+
+1. **Tauri/WebView 壳**：纯分发形态（独立 App、托盘灯）。launchd 按需唤醒已解决常驻成本问题，
+   壳的剩余价值 = 桌面图标 + 托盘红绿灯 + 给别人装机。
+2. **告警通知**：服务红灯 / 预算触线 / 审批挂起 → 系统通知或 webhook（面板关着也能知道）。
+3. **多机/团队维度**：共享预算池、跨机 transcript 汇总、成本归因到项目/会话。
+

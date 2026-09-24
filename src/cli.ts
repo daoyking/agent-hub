@@ -19,7 +19,7 @@ import type { EngineSpec } from './registry.ts';
 import { probe } from './doctor.ts';
 import { runTurn } from './bus.ts';
 import type { ApprovalMode } from './policy.ts';
-import type { ApprovalRequest, NormalizedEvent } from './normalize.ts';
+import type { ApprovalRequest, NormalizedEvent, DiffEntry } from './normalize.ts';
 import { listTranscripts, resolveResume, aggregateStats } from './sessions.ts';
 import { loadBudget, saveBudget, checkBudget, hasAnyLimit, BUDGET_FILE } from './budget.ts';
 import type { BudgetLimits } from './budget.ts';
@@ -129,6 +129,28 @@ function shortCapabilities(caps: Record<string, unknown>): string {
 }
 
 /** 把统一事件渲染成人类可读的行 —— P1 的 UI 就是把这里换成组件 */
+/** 文件改动的 CLI 摘要：前缀/后缀裁剪的行级微 diff（红删绿增） */
+function renderDiffSummary(d: DiffEntry): string {
+  const oldLines = (d.oldText ?? '').split('\n');
+  const newLines = d.newText.split('\n');
+  let pre = 0;
+  while (pre < oldLines.length && pre < newLines.length && oldLines[pre] === newLines[pre]) pre++;
+  let suf = 0;
+  while (
+    suf < oldLines.length - pre &&
+    suf < newLines.length - pre &&
+    oldLines[oldLines.length - 1 - suf] === newLines[newLines.length - 1 - suf]
+  )
+    suf++;
+  const del = oldLines.slice(pre, oldLines.length - suf);
+  const add = newLines.slice(pre, newLines.length - suf);
+  const head = `\x1b[35m📝 ${d.path}  -${del.length}/+${add.length}\x1b[0m\n`;
+  const body =
+    del.map((l) => `\x1b[31m- ${l}\x1b[0m\n`).join('') + add.map((l) => `\x1b[32m+ ${l}\x1b[0m\n`).join('');
+  return head + body;
+}
+
+
 function renderEvent(ev: NormalizedEvent, opts: { json: boolean; quiet: boolean }): void {
   if (opts.json) {
     process.stdout.write(JSON.stringify(ev) + '\n');
@@ -143,9 +165,20 @@ function renderEvent(ev: NormalizedEvent, opts: { json: boolean; quiet: boolean 
       break;
     case 'tool.call':
       process.stderr.write(`\n\x1b[36m▸ ${ev.name} [${ev.kind}/${ev.status}] ${ev.title}\x1b[0m\n`);
+      if (ev.diffs) for (const d of ev.diffs) process.stderr.write(renderDiffSummary(d));
       break;
     case 'tool.result':
       process.stderr.write(`\x1b[32m✔ ${ev.id} ${ev.ok ? 'ok' : 'failed'}\x1b[0m\n`);
+      if (ev.diffs) for (const d of ev.diffs) process.stderr.write(renderDiffSummary(d));
+      break;
+    case 'terminal.create':
+      process.stderr.write(`\x1b[33m$ ${ev.command} ${ev.args.join(' ')}\x1b[0m\x1b[2m · ${ev.cwd ?? ''}\x1b[0m\n`);
+      break;
+    case 'terminal.output':
+      if (!opts.quiet) process.stderr.write(`\x1b[2m${ev.chunk}\x1b[0m`);
+      break;
+    case 'terminal.exit':
+      process.stderr.write(`\x1b[2m[终端退出 code=${ev.exitCode ?? '-'}${ev.signal ? ` signal=${ev.signal}` : ''}]\x1b[0m\n`);
       break;
     case 'plan':
       process.stderr.write(

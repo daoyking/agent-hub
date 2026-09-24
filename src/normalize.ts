@@ -11,6 +11,9 @@ import type { SessionUpdate, ToolKind, ToolCallStatus } from '@agentclientprotoc
 
 export type Risk = 'low' | 'high';
 
+/** tool.call/tool.result 上携带的文件改动（ACP ToolCallContent type=diff） */
+export type DiffEntry = { path: string; oldText?: string | null; newText: string };
+
 export type NormalizedEvent =
   | { k: 'user.delta'; text: string; messageId?: string | null }
   | { k: 'msg.delta'; text: string; messageId?: string | null }
@@ -25,6 +28,7 @@ export type NormalizedEvent =
       risk: Risk;
       rawInput?: unknown;
       locations: string[];
+      diffs?: DiffEntry[];
     }
   | {
       k: 'tool.result';
@@ -33,6 +37,7 @@ export type NormalizedEvent =
       ok: boolean;
       output?: string;
       rawOutput?: unknown;
+      diffs?: DiffEntry[];
     }
   | { k: 'plan'; steps: Array<{ title: string; status: 'pending' | 'doing' | 'done' }> }
   | { k: 'session.info'; title?: string | null; updatedAt?: string | null }
@@ -40,6 +45,9 @@ export type NormalizedEvent =
   | { k: 'commands'; commands: string[] }
   | { k: 'usage'; used: number; size: number; costUsd?: number }
   | { k: 'notice'; level: string; text: string }
+  | { k: 'terminal.create'; id: string; command: string; args: string[]; cwd?: string }
+  | { k: 'terminal.output'; id: string; chunk: string }
+  | { k: 'terminal.exit'; id: string; exitCode?: number | null; signal?: string | null }
   | { k: 'raw'; update: string; payload: unknown };
 
 /** 工具类别 → 风险等级：审批策略引擎的唯一输入 */
@@ -82,6 +90,18 @@ function stringify(v: unknown): string | undefined {
   }
 }
 
+/** 从 ToolCallContent[] 里捞出 diff 条目（type=diff 的文件改动） */
+function diffsFromContent(content: unknown): DiffEntry[] | undefined {
+  if (!Array.isArray(content)) return undefined;
+  const diffs = content
+    .filter(
+      (c): c is DiffEntry & { type: 'diff' } =>
+        !!c && typeof c === 'object' && (c as { type?: string }).type === 'diff',
+    )
+    .map((c) => ({ path: c.path, oldText: c.oldText, newText: c.newText }));
+  return diffs.length > 0 ? diffs : undefined;
+}
+
 /** 把一条 ACP `session/update` 映射成统一事件；无法映射的走 raw 兜底（不丢信息） */
 export function normalize(update: SessionUpdate): NormalizedEvent | null {
   switch (update.sessionUpdate) {
@@ -103,6 +123,7 @@ export function normalize(update: SessionUpdate): NormalizedEvent | null {
         risk: riskOf(update.kind),
         rawInput: update.rawInput,
         locations: (update.locations ?? []).map((l) => l.path),
+        diffs: diffsFromContent(update.content),
       };
 
     case 'tool_call_update': {
@@ -121,6 +142,7 @@ export function normalize(update: SessionUpdate): NormalizedEvent | null {
         output: stringify(update.rawOutput),
         ok: status !== 'failed',
         locations: (update.locations ?? []).map((l) => l.path),
+        diffs: diffsFromContent(update.content),
       } as NormalizedEvent;
     }
 
