@@ -20,7 +20,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type * as acp from '@agentclientprotocol/sdk';
-import { BUILTIN_ENGINES, findEngine } from './registry.ts';
+import { BUILTIN_ENGINES, loadEngines, findEngine } from './registry.ts';
 import { runTurn } from './bus.ts';
 import { discover, probeService, loadManifest } from './services.ts';
 import { scanMcp, toAcpMcpServers } from './mcphub.ts';
@@ -151,7 +151,7 @@ async function gatherState(): Promise<ServerState> {
     serviceLamp: e.serviceLamp,
   }));
   return {
-    engines: BUILTIN_ENGINES.map((e) => ({
+    engines: loadEngines().map((e) => ({
       id: e.id,
       label: e.label,
       vendor: e.vendor,
@@ -185,7 +185,7 @@ async function handleAsk(body: Record<string, unknown>): Promise<void> {
   if (!spec || !prompt) {
     broadcast({
       k: 'ask.error',
-      error: `engine/prompt 缺失（可用: ${BUILTIN_ENGINES.map((e) => e.id).join(', ')}）`,
+      error: `engine/prompt 缺失（可用: ${loadEngines().map((e) => e.id).join(', ')}）`,
     });
     return;
   }
@@ -361,6 +361,7 @@ export async function startServer(opts: {
   // 注意：launchd 按需唤醒模式下 serve 空闲退出后 watcher 随之停止——
   // 要持续监控请常驻运行（agentbd serve，不装 plist）。
   const lampMem = new Map<string, string>();
+  let lampFirstRound = true; // 首轮只建档（避免进程启动时把存量红灯全报一遍）
   const svcWatch = setInterval(() => {
     void (async () => {
       try {
@@ -369,7 +370,17 @@ export async function startServer(opts: {
           const h = await probeService(s, 'l1');
           const prev = lampMem.get(s.id);
           lampMem.set(s.id, h.lamp);
-          if (prev === undefined) continue; // 首轮只建档，不通知
+          if (prev === undefined) {
+            // 首轮：静默建档。后续轮次新出现的服务若已不可用，则值得立刻知道
+            // （否则“新增即挂”的服务会因建档为 red 而永远不触发跃迁报警）
+            if (!lampFirstRound && h.lamp === 'red') {
+              void notify('agentbd 服务红灯', `${s.id}（新增）· ${h.detail}`.trim(), {
+                tag: `svc:${s.id}`,
+                minIntervalSec: 300,
+              });
+            }
+            continue;
+          }
           if (h.lamp === 'red' && prev !== 'red') {
             void notify('agentbd 服务红灯', `${s.id} · ${h.detail}`.trim(), {
               tag: `svc:${s.id}`,
@@ -381,6 +392,8 @@ export async function startServer(opts: {
         }
       } catch {
         /* watcher 失败静默，下轮再试 */
+      } finally {
+        lampFirstRound = false;
       }
     })();
   }, 120000);

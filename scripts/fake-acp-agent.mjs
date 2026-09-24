@@ -38,6 +38,18 @@ app.onRequest('session/prompt', async (ctx) => {
     },
   });
 
+  // ①b plan 二次更新：覆盖 completed → done 渲染（真实引擎会多次更新计划）
+  await cl.notify('session/update', {
+    sessionId,
+    update: {
+      sessionUpdate: 'plan',
+      entries: [
+        { content: '步骤一：跑终端命令', status: 'completed', priority: 'medium' },
+        { content: '步骤二：改文件', status: 'in_progress', priority: 'medium' },
+      ],
+    },
+  });
+
   // ② terminal 全生命周期（整串 command、无 args——agnes 真实形态；deny 模式下这里会抛错）
   let termNote;
   try {
@@ -61,6 +73,25 @@ app.onRequest('session/prompt', async (ctx) => {
       title: '编辑 demo.txt',
       kind: 'edit',
       status: 'completed',
+      content: [
+        {
+          type: 'diff',
+          path: '/tmp/acp-e2e/demo.txt',
+          oldText: 'line1\nline2\nline3',
+          newText: 'line1\nCHANGED\nline3',
+        },
+      ],
+    },
+  });
+
+  // ③b tool_call_update：真正触发 tool.result 的那条（带 rawOutput + diffs）
+  await cl.notify('session/update', {
+    sessionId,
+    update: {
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'tc-diff-1',
+      status: 'completed',
+      rawOutput: { written: '/tmp/acp-e2e/demo.txt', bytes: 21 },
       content: [
         {
           type: 'diff',

@@ -77,16 +77,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
 
     private func pollLamp() {
         URLSession.shared.dataTask(with: panelURL.appendingPathComponent("api/state")) { [weak self] data, _, _ in
-            guard let data,
-                  let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let services = j["services"] as? [[String: Any]] else { return }
-            var worst = "green"
-            for s in services {
-                let l = s["lamp"] as? String ?? "unknown"
-                if l == "red" { worst = "red" }
-                else if l == "amber", worst == "green" { worst = "amber" }
-            }
-            DispatchQueue.main.async { self?.setLamp(worst) }
+            guard let data else { return }
+            let lamp = worstLamp(fromStateJSON: data) // 逻辑在 LampProbe.swift（可单测）
+            DispatchQueue.main.async { self?.setLamp(lamp) }
         }.resume()
     }
 
@@ -98,8 +91,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     }
 }
 
-let app = NSApplication.shared
-app.setActivationPolicy(.accessory) // 托盘应用：不占 Dock，窗口照常
-let delegate = AppDelegate()
-app.delegate = delegate
-app.run()
+@main
+struct PanelMain {
+    static func main() {
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory) // 托盘应用：不占 Dock，窗口照常
+        let delegate = AppDelegate()
+        app.delegate = delegate
+        app.run()
+    }
+}

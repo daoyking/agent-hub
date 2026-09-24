@@ -193,6 +193,44 @@ export function engineEnv(spec: EngineSpec): Record<string, string> {
   return { ...(spec.env ?? {}), ...env };
 }
 
-export function findEngine(id: string, engines: EngineSpec[] = BUILTIN_ENGINES): EngineSpec | undefined {
+export function findEngine(id: string, engines: EngineSpec[] = loadEngines()): EngineSpec | undefined {
   return engines.find((e) => e.id === id || e.label === id);
+}
+
+/* --------------------------- 用户自定义引擎 --------------------------- */
+
+export const ENGINES_FILE = path.join(os.homedir(), '.agentbd', 'engines.json');
+
+/**
+ * 合并内置清单 + `~/.agentbd/engines.json`（设计原则：新增 agent 的边际成本 = 加一条记录）。
+ *
+ * 文件格式（裸数组或 {engines:[…]} 均可）：
+ *   [{ "id": "my-agent", "label": "My Agent", "vendor": "Me",
+ *      "command": "node", "args": ["/path/agent.mjs"], "channel": "acp" }]
+ *
+ * 语义：同 id → 字段级覆盖内置（只写要改的字段）；新 id → 追加（需 command）。
+ * 坏文件不崩：读失败/JSON 出错时静默退回内置清单。
+ */
+export function loadEngines(): EngineSpec[] {
+  const out = BUILTIN_ENGINES.map((e) => ({ ...e }));
+  let list: unknown;
+  try {
+    if (!existsSync(ENGINES_FILE)) return out;
+    const raw = JSON.parse(readFileSync(ENGINES_FILE, 'utf8')) as unknown;
+    list = Array.isArray(raw) ? raw : (raw as { engines?: unknown })?.engines;
+  } catch {
+    return out;
+  }
+  if (!Array.isArray(list)) return out;
+  for (const item of list) {
+    if (!item || typeof item !== 'object') continue;
+    const spec = item as Partial<EngineSpec>;
+    if (typeof spec.id !== 'string' || !spec.id) continue;
+    const i = out.findIndex((e) => e.id === spec.id);
+    if (i >= 0) out[i] = { ...out[i]!, ...spec } as EngineSpec;
+    else if (typeof spec.command === 'string') {
+      out.push({ label: spec.id, vendor: 'custom', args: [], channel: 'acp', ...spec } as EngineSpec);
+    }
+  }
+  return out;
 }

@@ -290,6 +290,9 @@ $ agentbd serve uninstall  # 一键还原
 | `mcp-probe-cache.json` | MCP tools/list 探针结果缓存（TTL 2min，只缓存成功结果） |
 | `health.json` | 服务健康缓存，带 `at` 时间戳，聚合灯取最老一条的年龄 |
 | `services.json` | 服务清单（`services init` 生成骨架 + 手工校准，含 L2/L3 探针声明） |
+| `engines.json` | 自定义引擎（同 id 覆盖内置字段，新 id 追加——新增 agent 的边际成本 = 加一条记录） |
+| `notify.json` | 告警通知（`enabled`/`webhook`/`minIntervalSec`；缺文件 = 默认开系统通知） |
+| `team.json` | 团队维度（hub/token/name + 共享池限额 sharedDailyTokens/sharedMonthlyTokens） |
 
 - `--json` 事件流里不含任何凭据：凭证只由各引擎自己从 Keychain / 自己的配置读取。
 - **CI 跑不了 `doctor`**：它要的是本机已登录的引擎（claude/codex/gemini/codebuddy/qoder）
@@ -317,8 +320,9 @@ trae dir 写回与 `~/.omh` 对接经实测不适用，明确关闭（§13）。
   webhook 双通道，配置在 `~/.agentbd/notify.json`（`enabled`/`webhook`/`minIntervalSec`，缺文件默认开），
   同 tag 去抖防刷屏，通知失败绝不影响业务。三个触发点：审批挂起/超时（server.ts，面板关着也知道
   有决策在等）、预算超限拦截与近限告警（bus.ts，CLI/ serve 同源）、服务红灯迁移与恢复
-  （server.ts 2 分钟 L1 watcher，首轮建档不轰炸）。注意：launchd 按需唤醒模式下 serve 空闲退出后
-  红灯 watcher 随之停止，要持续监控请常驻 `agentbd serve`。
+  （server.ts 2 分钟 L1 watcher，首轮静默建档不轰炸；首轮之后**新出现**的服务若已红灯也报警——
+  否则「新增即挂」的服务会因建档即红而漏报，2026-09-24 实测发现并修复）。注意：launchd 按需
+  唤醒模式下 serve 空闲退出后红灯 watcher 随之停止，要持续监控请常驻 `agentbd serve`。
 - ✅ **P2-3 桌面壳（2026-09-24）**：`shell/AgentbdPanel.swift`——纯 Swift 的 WKWebView 包装
   （选 Swift 而非 Tauri：本机已有 Xcode 工具链，系统 WebView 够用，壳不增加功能只做分发）。
   `agentbd panel build/install/open`：编译进 `~/Applications/agentbd-panel.app`，install 加登录项
@@ -334,4 +338,34 @@ trae dir 写回与 `~/.omh` 对接经实测不适用，明确关闭（§13）。
   `checkBudget({skipTeam:true})`，否则 hub 指向自身时 /api/team 无限自指递归。
 
 **P2 已收官**（P2-1 全量 ACP · P2-2 告警通知 · P2-3 桌面壳 · P2-4 多机/团队）。
+
+## P2 收官验证（2026-09-24）
+
+三件验证都做成**可断言**的，不靠"看一眼"：
+
+| 验证 | 手段 | 结果 |
+|---|---|---|
+| 面板新卡片渲染 | `npm run ui-verify`：jsdom 载入**真实 ui.html** + 桥接**真实 SSE** + 夹具引擎跑一轮真回合，断言渲染后的 DOM | **17/17**——审批卡片挂起/放行后移除、终端实时输出与退出码、plan ✔/▶ 图标、diff 红绿行与前后缀裁剪提示；页面 JS 零错误 |
+| 告警通知链路 | 本地 webhook 收集器（`notify.json` 指向 127.0.0.1:19999） | 审批挂起瞬间收到 `agentbd 审批等待 · fake · high风险 · $ echo …`，系统通知同时弹出 |
+| 桌面壳托盘灯 | `npm run lamp-test`（灯色判定抽成 `shell/LampProbe.swift` 单测）+ `agentbd panel install` | 单测 **8/8**；登录项已注册（开机自启） |
+
+验证中修掉的**真问题**（都是"文档/设计承诺与实现不一致"或边界漏报）：
+
+1. **`~/.agentbd/engines.json` 承诺未实现**——registry.ts 注释写着"用户可覆盖/追加"，
+   代码里没有任何读取逻辑。已实现 `loadEngines()`：同 id 字段级覆盖、新 id 追加（需 command）、
+   坏文件静默退回内置；CLI / serve / doctor / 帮助文本全部改走它。
+2. **服务红灯 watcher 漏报「新增即挂」**——首轮静默建档的设计下，若某服务在第一轮建档时**已经是红**，
+   下一轮 `prev` 也是红 → 永远不触发"绿→红跃迁" → 永不报警。已改为：首轮静默，**之后新出现**
+   的服务若已红灯立即报警。
+3. **Swift 壳拆文件后启动代码非法**——多文件编译要求顶层代码必须在 `main.swift`，抽出
+   `LampProbe.swift` 后原来的顶层 `app.run()` 编译失败 → 改为 `@main`。
+
+**回归夹具**（都可重跑，不接模型）：
+
+- `scripts/fake-acp-agent.mjs`——受控 ACP agent：plan 两次更新（覆盖 ✔/▶ 两种图标）、
+  terminal 全生命周期、`tool_call` + `tool_call_update`（覆盖 diff 在 `tool.call` 与 `tool.result`
+  两条路径上的渲染）。
+- `scripts/ui-verify.mjs`——面板渲染断言（前置：注册 fake 引擎到 `engines.json` +
+  `agentbd serve --port 7801` + `npm i -D jsdom`）。渲染快照落到 `/tmp/ui-rendered.html`。
+- `shell/lamp-test.sh`——托盘灯色判定单测（red > amber > 其它；unknown 不压低绿灯；坏 JSON 不崩）。
 

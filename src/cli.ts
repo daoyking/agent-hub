@@ -14,7 +14,7 @@
 
 import { createInterface } from 'node:readline/promises';
 import type * as acp from '@agentclientprotocol/sdk';
-import { BUILTIN_ENGINES, findEngine } from './registry.ts';
+import { BUILTIN_ENGINES, loadEngines, findEngine, ENGINES_FILE } from './registry.ts';
 import type { EngineSpec } from './registry.ts';
 import { probe } from './doctor.ts';
 import { runTurn } from './bus.ts';
@@ -222,7 +222,7 @@ function renderEvent(ev: NormalizedEvent, opts: { json: boolean; quiet: boolean 
 
 async function cmdEngines(): Promise<void> {
   console.log('id           vendor       channel        label');
-  for (const e of BUILTIN_ENGINES) {
+  for (const e of loadEngines()) {
     console.log(`${e.id.padEnd(12)} ${e.vendor.padEnd(12)} ${e.channel.padEnd(14)} ${e.label}`);
   }
 }
@@ -231,7 +231,7 @@ async function cmdDoctor(targets: string[], flags: Flags): Promise<void> {
   const specs: EngineSpec[] =
     targets.length > 0
       ? targets.map((t) => findEngine(t) ?? ({ id: t, label: t, vendor: 'custom', command: t, args: [], channel: 'acp' } as EngineSpec))
-      : BUILTIN_ENGINES;
+      : loadEngines();
 
   const results = await Promise.all(specs.map((s) => probe(s, flags.cwd)));
   let bad = 0;
@@ -273,7 +273,7 @@ async function cmdAsk(flags: Flags): Promise<void> {
   }
   const spec = findEngine(engineId);
   if (!spec) {
-    console.error(`未知引擎: ${engineId}（可用: ${BUILTIN_ENGINES.map((e) => e.id).join(', ')}）`);
+    console.error(`未知引擎: ${engineId}（可用: ${loadEngines().map((e) => e.id).join(', ')}）`);
     process.exitCode = 2;
     return;
   }
@@ -926,7 +926,8 @@ const HELP = `agentbd 0.1.0 —— 多 agent + 本地服务 统一总线（P0 �
   agentbd budget set dailyTokens=100000 dailyUsd=5 [monthlyTokens=… warnAt=0.8]
   agentbd budget clear                          清空限额
 
-引擎: ${BUILTIN_ENGINES.map((e) => e.id).join(', ')}
+引擎: ${loadEngines().map((e) => e.id).join(', ')}
+自定义引擎: ${ENGINES_FILE}（同 id 覆盖内置字段，新 id 追加）
 清单: ${SERVICES_FILE}`;
 
 async function main(): Promise<void> {

@@ -10,7 +10,7 @@ BIN="$APP/Contents/MacOS/agentbd-panel"
 # 编译（系统 Swift 工具链，arm64，macOS 13+）
 swiftc -O -target arm64-apple-macos13.0 \
   -o /tmp/agentbd-panel-bin \
-  "$SRC_DIR/AgentbdPanel.swift" \
+  "$SRC_DIR/AgentbdPanel.swift" "$SRC_DIR/LampProbe.swift" \
   -framework Cocoa -framework WebKit
 
 # 组 bundle
