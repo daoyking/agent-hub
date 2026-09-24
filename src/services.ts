@@ -300,9 +300,17 @@ export async function discover(): Promise<LocalService[]> {
   const claimed = new Set<number>();
 
   // ① launchd 作业 → 用 ProgramArguments 里的路径型 token 去完整 cmdline 找进程
+  // 可执行文件（args[0]）足够具体时，只认它：防止参数里的路径 token（如
+  // omh-menubar 的 --hermes-home /Users/jindy/.hermes）张冠李戴到别的服务进程上。
+  const GENERIC_EXE = new Set(['/usr/bin/python3', '/usr/bin/env', '/bin/sh', '/bin/bash', '/bin/zsh']);
   for (const p of pl) {
     const tokens = p.args.filter((a) => a.length > 8 && a.includes('/'));
-    const hit = ls.find((l) => l.cmdline && tokens.some((t) => l.cmdline.includes(t)));
+    const exe = p.args[0] ?? '';
+    const exeSpecific = exe.length > 8 && exe.includes('/') && !GENERIC_EXE.has(exe);
+    // 可执行文件具体但没匹配到 → 进程没在监听（不为别的端口认领）；只有通用 exe 才回退任意 token
+    const hit = exeSpecific
+      ? ls.find((l) => l.cmdline?.includes(exe))
+      : ls.find((l) => l.cmdline && tokens.some((t) => l.cmdline.includes(t)));
     services.set(p.label, {
       id: p.label,
       label: p.label,
