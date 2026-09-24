@@ -222,12 +222,46 @@ export async function httpProbe(
 
 export type ProbeLevel = 'l1' | 'l2' | 'l3';
 
+/** 进程存活探针：无端口服务（如菜单栏 UI）用 expectCmdline 在 ps 里找活口 */
+async function processAlive(expectCmdline: string): Promise<boolean | undefined> {
+  try {
+    const re = new RegExp(expectCmdline);
+    // 排除自身祖先链：调用方 shell 的 argv 里可能恰好含着 pattern（false positive）
+    const skip = new Set<number>([process.pid]);
+    let pp = process.ppid;
+    for (let i = 0; i < 8 && pp > 1; i++) {
+      skip.add(pp);
+      const { stdout: ppo } = await exec('ps', ['-o', 'ppid=', '-p', String(pp)]);
+      pp = parseInt(ppo.trim(), 10) || 1;
+    }
+    const { stdout } = await exec('ps', ['-wwaxo', 'pid=,command='], { maxBuffer: 8 * 1024 * 1024 });
+    return stdout.split('\n').some((line) => {
+      const m = line.match(/^\s*(\d+)\s+(.*)$/);
+      return !!m && !skip.has(Number(m[1])) && re.test(m[2]);
+    });
+  } catch {
+    return undefined; // 判不了就放行
+  }
+}
+
 export async function probeService(svc: LocalService, level: ProbeLevel): Promise<Health> {
   const at = Date.now();
   const port = svc.ports[0];
   const h: Health = { l1: 'unknown', l2: 'skipped', l3: 'skipped', lamp: 'unknown', detail: '', at };
 
   if (port === undefined) {
+    // 无端口服务：有 expectCmdline 就退化为进程存活探针（绿=活着，红=死了）
+    if (svc.expectCmdline) {
+      const alive = await processAlive(svc.expectCmdline);
+      if (alive !== undefined) {
+        h.l1 = alive ? 'up' : 'down';
+        h.lamp = alive ? 'green' : 'red';
+        h.detail = alive
+          ? `进程存活（/${svc.expectCmdline}/ 匹配）· 无端口，无 L2 可探`
+          : `进程不在（/${svc.expectCmdline}/ 无匹配）`;
+        return h;
+      }
+    }
     h.detail = '未声明端口';
     return h;
   }
