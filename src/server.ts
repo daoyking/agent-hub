@@ -27,6 +27,9 @@ import { scanMcp, toAcpMcpServers } from './mcphub.ts';
 import { resolveResume, aggregateStats } from './sessions.ts';
 import { checkBudget } from './budget.ts';
 import { notify } from './notify.ts';
+import { machineName, loadTeamConfig } from './team.ts';
+import type { TeamMachine } from './team.ts';
+import { insertTeamReport, queryTeamReports } from './store.ts';
 import type { LocalService } from './services.ts';
 import type { NormalizedEvent } from './normalize.ts';
 import type { ApprovalRequest } from './normalize.ts';
@@ -248,12 +251,35 @@ export async function startServer(opts: {
   activateFd?: number;
   /** 空闲自退：无活跃连接持续这么久就 exit(0)，launchd 会在下次连接时重新拉起 */
   idleExitMs?: number;
+  /**
+   * P2-4 团队 hub 模式：共享密钥。设置后所有 /api/* 与 /events 需
+   * Authorization: Bearer <token>（/events 也接受 ?token=，EventSource 不能设头）。
+   * 非回环绑定（--host 0.0.0.0）必须提供 token，否则拒绝启动。
+   */
+  token?: string;
 }): Promise<{ url: string; server: Server }> {
+  const LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1']);
+  if (!LOOPBACK.has(opts.host) && !opts.token) {
+    throw new Error(
+      `绑定 ${opts.host} 是对局域网开放的，必须配 --token 共享密钥（团队 hub 模式）。` +
+        `仅本机使用请保持默认 --host 127.0.0.1。`,
+    );
+  }
+  const authed = (req: IncomingMessage, url: URL): boolean =>
+    !opts.token ||
+    req.headers.authorization === `Bearer ${opts.token}` ||
+    url.searchParams.get('token') === opts.token;
   const uiHtml = await readFile(UI_FILE, 'utf8');
   const server = createServer((req, res) => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
     void (async () => {
       try {
+        if (url.pathname.startsWith('/api/') || url.pathname === '/events') {
+          if (!authed(req, url)) {
+            json(res, 401, { error: 'unauthorized: 需要 Bearer token（agentbd serve --token）' });
+            return;
+          }
+        }
         if (req.method === 'GET' && url.pathname === '/') {
           res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
           res.end(uiHtml);
@@ -284,8 +310,36 @@ export async function startServer(opts: {
           pending.resolve(allow);
           json(res, 200, { decided: true, allow });
           broadcast({ k: 'approval.decided', id, engine: pending.engine, allow });
+        } else if (req.method === 'POST' && url.pathname === '/api/report') {
+          // P2-4 hub 侧：接收 spoke 用量上报（只有聚合数字，不含 prompt 原文）
+          const body = await readBody(req);
+          const entry = {
+            machine: String(body.machine ?? 'unknown'),
+            name: String(body.name ?? body.machine ?? 'unknown'),
+            at: typeof body.at === 'number' ? body.at : Date.now(),
+            today: (body.today ?? { turns: 0, tokens: 0, costUsd: 0 }) as TeamMachine['today'],
+            month: (body.month ?? { turns: 0, tokens: 0, costUsd: 0 }) as TeamMachine['month'],
+          } satisfies TeamMachine;
+          await insertTeamReport(entry);
+          json(res, 200, { stored: true });
+        } else if (req.method === 'GET' && url.pathname === '/api/team') {
+          // P2-4 hub 侧：全队视图 = 本机实时聚合 + 各 spoke 最新上报
+          // （skipTeam：本 handler 若再走共享池检查会自指递归）
+          const st = await checkBudget({ skipTeam: true });
+          const self: TeamMachine = {
+            machine: machineName(),
+            name: (await loadTeamConfig()).name ?? machineName(),
+            at: Date.now(),
+            today: st.today,
+            month: st.month,
+          };
+          const reports = (await queryTeamReports()) ?? [];
+          json(res, 200, {
+            machines: [self, ...reports.filter((r) => r.machine !== self.machine)],
+            at: Date.now(),
+          });
         } else if (req.method === 'GET' && url.pathname === '/api/stats') {
-          json(res, 200, { ...(await aggregateStats()), budget: await checkBudget() });
+          json(res, 200, { ...(await aggregateStats()), budget: await checkBudget({ skipTeam: true }) });
         } else if (req.method === 'POST' && url.pathname === '/api/refresh') {
           const state = await gatherState();
           json(res, 200, state);

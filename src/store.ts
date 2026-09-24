@@ -47,6 +47,13 @@ CREATE TABLE IF NOT EXISTS events (
   raw TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_events_k ON events(k);
+CREATE TABLE IF NOT EXISTS team_reports (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  machine TEXT NOT NULL,
+  at INTEGER NOT NULL,
+  payload TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_team_reports_machine ON team_reports(machine, at);
 `;
 
 /** 打开（并初始化）数据库；不可用时返回 null（调用方走降级路径） */
@@ -248,6 +255,44 @@ export async function queryToolStats(since?: number): Promise<ToolStatRow[] | nu
        GROUP BY t.engine, tool ORDER BY calls DESC, lastTs DESC`,
     )
     .all(...(since !== undefined ? [since] : [])) as ToolStatRow[];
+}
+
+/* ------------------------------ P2-4 团队上报 ------------------------------ */
+
+import type { TeamMachine } from './team.ts';
+
+/** hub 侧：存一条 spoke 上报（payload 为 TeamMachine JSON） */
+export async function insertTeamReport(entry: TeamMachine): Promise<boolean> {
+  const d = await getDb();
+  if (!d) return false;
+  d.prepare('INSERT INTO team_reports (machine, at, payload) VALUES (?, ?, ?)').run(
+    entry.machine,
+    entry.at,
+    JSON.stringify(entry),
+  );
+  return true;
+}
+
+/** hub 侧：每台 spoke 取最新一条上报（按机器分组，at 最大者） */
+export async function queryTeamReports(): Promise<TeamMachine[] | null> {
+  const d = await getDb();
+  if (!d) return null;
+  const rows = d
+    .prepare(
+      `SELECT payload FROM team_reports t
+       WHERE at = (SELECT MAX(at) FROM team_reports WHERE machine = t.machine)
+       GROUP BY machine ORDER BY at DESC`,
+    )
+    .all() as Array<{ payload: string }>;
+  const out: TeamMachine[] = [];
+  for (const r of rows) {
+    try {
+      out.push(JSON.parse(r.payload) as TeamMachine);
+    } catch {
+      /* 跳过坏行 */
+    }
+  }
+  return out;
 }
 
 export async function dbInfo(): Promise<{

@@ -11,6 +11,7 @@
 import { readFile, writeFile, rename, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { ROOT, aggregateStats } from './sessions.ts';
+import { loadTeamConfig, fetchTeam, machineName } from './team.ts';
 
 export const BUDGET_FILE = path.join(ROOT, 'budget.json');
 
@@ -58,6 +59,8 @@ export type BudgetStatus = {
   exceeded: string[];
   /** 近限告警（≥ warnAt 但未超限） */
   warnings: string[];
+  /** P2-4：共享预算池汇总（配置了 team.hub + 共享限额时才有） */
+  team?: { machines: number; todayTokens: number; monthTokens: number };
 };
 
 function dayStart(): number {
@@ -76,7 +79,7 @@ function monthStart(): number {
 const fmtTok = (n: number): string => (n >= 10000 ? `${(n / 1000).toFixed(1)}k` : String(n));
 const fmtUsd = (n: number): string => `$${n.toFixed(4)}`;
 
-export async function checkBudget(): Promise<BudgetStatus> {
+export async function checkBudget(opts?: { skipTeam?: boolean }): Promise<BudgetStatus> {
   const limits = await loadBudget();
   const [todayS, monthS] = await Promise.all([
     aggregateStats(500, dayStart()),
@@ -96,5 +99,26 @@ export async function checkBudget(): Promise<BudgetStatus> {
   chk('今日成本', today.costUsd, limits.dailyUsd, fmtUsd);
   chk('本月 tokens', month.tokens, limits.monthlyTokens, fmtTok);
   chk('本月成本', month.costUsd, limits.monthlyUsd, fmtUsd);
-  return { limits, today, month, exceeded, warnings };
+
+  // P2-4 共享预算池：配了 team.hub + 共享限额时，把全队用量纳入判定。
+  // hub 不可达 fail-open（本机限额仍然生效），只留一条 warning 提示。
+  // skipTeam：hub 自己的 HTTP handler 必须跳过，否则 /api/team → checkBudget
+  // → fetchTeam(自己) → /api/team 无限递归（hub 指向自身的场景）。
+  let team: BudgetStatus['team'];
+  if (!opts?.skipTeam) try {
+    const cfg = await loadTeamConfig();
+    if (cfg.hub && (cfg.sharedDailyTokens || cfg.sharedMonthlyTokens)) {
+      const t = await fetchTeam(cfg.hub, cfg.token);
+      const me = machineName();
+      const others = t.machines.filter((m) => m.machine !== me);
+      const teamToday = today.tokens + others.reduce((s, m) => s + (m.today?.tokens ?? 0), 0);
+      const teamMonth = month.tokens + others.reduce((s, m) => s + (m.month?.tokens ?? 0), 0);
+      team = { machines: t.machines.length, todayTokens: teamToday, monthTokens: teamMonth };
+      chk('团队池·今日 tokens', teamToday, cfg.sharedDailyTokens, fmtTok);
+      chk('团队池·本月 tokens', teamMonth, cfg.sharedMonthlyTokens, fmtTok);
+    }
+  } catch {
+    warnings.push('团队池: hub 不可达，本次仅按本机限额判定（fail-open）');
+  }
+  return { limits, today, month, exceeded, warnings, team };
 }

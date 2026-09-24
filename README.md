@@ -319,10 +319,19 @@ trae dir 写回与 `~/.omh` 对接经实测不适用，明确关闭（§13）。
   有决策在等）、预算超限拦截与近限告警（bus.ts，CLI/ serve 同源）、服务红灯迁移与恢复
   （server.ts 2 分钟 L1 watcher，首轮建档不轰炸）。注意：launchd 按需唤醒模式下 serve 空闲退出后
   红灯 watcher 随之停止，要持续监控请常驻 `agentbd serve`。
+- ✅ **P2-3 桌面壳（2026-09-24）**：`shell/AgentbdPanel.swift`——纯 Swift 的 WKWebView 包装
+  （选 Swift 而非 Tauri：本机已有 Xcode 工具链，系统 WebView 够用，壳不增加功能只做分发）。
+  `agentbd panel build/install/open`：编译进 `~/Applications/agentbd-panel.app`，install 加登录项
+  开机自启。托盘红绿灯（30s 轮询 /api/state 取最差一档），与 launchd 按需唤醒协同：
+  serve 空闲时进程数为 0，壳的首次连接自动拉起后端（1.5s 重试抹平冷启动）。
+- ✅ **P2-4 多机/团队（2026-09-24）**：hub-spoke 汇总 + 共享预算池。hub 侧
+  `agentbd serve --host 0.0.0.0 --token <密钥>`（非回环绑定无 token 拒绝启动；/api/* 与 /events
+  全部 Bearer 鉴权，SSE 走 ?token=）；spoke 侧 `agentbd team join <hub> token=…`（连通后才落
+  ~/.agentbd/team.json），`team report` 上报聚合用量（只有轮次/tokens/成本，不含 prompt 原文，
+  存 hub 的 team_reports 表），`team list` 看全队视图。共享池限额（sharedDailyTokens/
+  sharedMonthlyTokens）在 checkBudget 内判定：超限在**任意一台**机器的 ask 前拦截；
+  hub 不可达 fail-open（本机限额仍生效）。关键修复：hub 自身 HTTP handler 用
+  `checkBudget({skipTeam:true})`，否则 hub 指向自身时 /api/team 无限自指递归。
 
-**P2 候选**（剩余，按建议优先级）：
-
-1. **Tauri/WebView 壳**：纯分发形态（独立 App、托盘灯）。launchd 按需唤醒已解决常驻成本问题，
-   壳的剩余价值 = 桌面图标 + 托盘红绿灯 + 给别人装机。
-2. **多机/团队维度**：共享预算池、跨机 transcript 汇总、成本归因到项目/会话。
+**P2 已收官**（P2-1 全量 ACP · P2-2 告警通知 · P2-3 桌面壳 · P2-4 多机/团队）。
 

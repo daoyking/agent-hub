@@ -33,7 +33,12 @@ const exists = (p: string): Promise<boolean> =>
 const esc = (s: string): string =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
-function buildPlist(port: number, idleMin: number): string {
+function buildPlist(port: number, idleMin: number, host = '127.0.0.1', token?: string): string {
+  const extraArgs =
+    (host !== '127.0.0.1'
+      ? `    <string>--host</string>\n    <string>${esc(host)}</string>\n`
+      : '') +
+    (token ? `    <string>--token</string>\n    <string>${esc(token)}</string>\n` : '');
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -47,7 +52,7 @@ function buildPlist(port: number, idleMin: number): string {
     <string>serve</string>
     <string>--fd</string>
     <string>0</string>
-    <string>--idle</string>
+${extraArgs}    <string>--idle</string>
     <string>${idleMin}</string>
   </array>
   <key>Sockets</key>
@@ -57,7 +62,7 @@ function buildPlist(port: number, idleMin: number): string {
       <key>SockServiceName</key>
       <string>${port}</string>
       <key>SockNodeName</key>
-      <string>127.0.0.1</string>
+      <string>${esc(host)}</string>
     </dict>
   </dict>
   <key>inetdCompatibility</key>
@@ -88,19 +93,23 @@ async function portBusy(port: number): Promise<boolean> {
   });
 }
 
-export async function serveInstall(port: number, idleMin: number): Promise<void> {
+export async function serveInstall(port: number, idleMin: number, host = '127.0.0.1', token?: string): Promise<void> {
+  if (host !== '127.0.0.1' && !token) {
+    throw new Error(`hub 模式（--host ${host}）必须同时给 --token 共享密钥，否则拒绝安装。`);
+  }
   if (await portBusy(port)) {
     throw new Error(
       `127.0.0.1:${port} 正被占用（可能有手动 agentbd serve 在跑）。先关掉它再 install。`,
     );
   }
-  await writeFile(PLIST, buildPlist(port, idleMin), 'utf8');
+  await writeFile(PLIST, buildPlist(port, idleMin, host, token), 'utf8');
   // 已加载过先卸再装（幂等重装）
   await exec('launchctl', ['bootout', `${domain()}/${SERVE_LABEL}`]).catch(() => {});
   await exec('launchctl', ['bootstrap', domain(), PLIST]);
   console.log(`已安装并加载: ${PLIST}`);
-  console.log(`  端口 127.0.0.1:${port} 现在由 launchd 持有（进程数为 0）`);
-  console.log(`  打开 http://127.0.0.1:${port} 即自动拉起；空闲 ${idleMin} 分钟自动退出`);
+  console.log(`  端口 ${host}:${port} 现在由 launchd 持有（进程数为 0）`);
+  console.log(`  打开 http://${host === '0.0.0.0' ? '127.0.0.1' : host}:${port} 即自动拉起；空闲 ${idleMin} 分钟自动退出`);
+  if (token) console.log('  hub 模式：/api/* 与 /events 需要 Bearer token 鉴权');
   console.log(`  日志: ${path.join(LOG_DIR, 'serve.{out,err}.log')}`);
 }
 

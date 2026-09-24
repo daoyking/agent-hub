@@ -43,6 +43,22 @@ import { addMcp, removeMcp } from './mcpwrite.ts';
 import type { McpWriteSpec } from './mcpwrite.ts';
 import { startServer } from './server.ts';
 import { serveInstall, serveUninstall, serveStatus } from './serveinstall.ts';
+import {
+  TEAM_FILE,
+  loadTeamConfig,
+  saveTeamConfig,
+  clearTeamConfig,
+  fetchTeam,
+  postReport,
+  machineName,
+} from './team.ts';
+import type { TeamMachine } from './team.ts';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { homedir } from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { access } from 'node:fs/promises';
 
 type Flags = {
   cwd: string;
@@ -64,6 +80,8 @@ type Flags = {
   fd?: number;
   /** serve 空闲自退分钟数 */
   idleMin: number;
+  /** serve 团队 hub 模式的共享密钥（非回环绑定必填） */
+  token?: string;
   _: string[];
 };
 
@@ -108,6 +126,7 @@ function parseArgs(argv: string[]): Flags {
     else if (a === '--refresh') flags.refresh = true;
     else if (a === '--fd') flags.fd = Number(argv[++i]);
     else if (a === '--idle') flags.idleMin = Number(argv[++i]);
+    else if (a === '--token') flags.token = argv[++i];
     else if (a === '--resume') {
       const v = argv[i + 1];
       if (v && !v.startsWith('-')) { flags.resume = v; i++; }
@@ -669,12 +688,162 @@ async function cmdMcp(flags: Flags): Promise<void> {
   console.log('子命令: `mcp probe` 工具级握手 · `mcp add/remove` 写回各 agent 配置');
 }
 
+/* ------------------------------ P2-4 多机/团队 ------------------------------ */
+
+const execAsync = promisify(execFile);
+
+function parseKV(args: string[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const a of args) {
+    const i = a.indexOf('=');
+    if (i > 0) out[a.slice(0, i)] = a.slice(i + 1);
+  }
+  return out;
+}
+
+function fmtTok(n: number): string {
+  return n >= 10000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+}
+
+function printTeamTable(machines: TeamMachine[]): void {
+  console.log(`${'机器'.padEnd(18)} ${'今日 tokens'.padStart(12)} ${'今日成本'.padStart(10)} ${'本月 tokens'.padStart(12)}  最近上报`);
+  let tToday = 0;
+  let tMonth = 0;
+  for (const m of machines) {
+    tToday += m.today?.tokens ?? 0;
+    tMonth += m.month?.tokens ?? 0;
+    const ago = Math.round((Date.now() - m.at) / 60000);
+    console.log(
+      `${(m.name || m.machine).padEnd(18)} ${fmtTok(m.today?.tokens ?? 0).padStart(12)} ${('$' + (m.today?.costUsd ?? 0).toFixed(3)).padStart(10)} ${fmtTok(m.month?.tokens ?? 0).padStart(12)}  ${ago}min 前`,
+    );
+  }
+  console.log(`${'─'.repeat(70)}\n${'合计'.padEnd(18)} ${fmtTok(tToday).padStart(12)} ${''.padStart(10)} ${fmtTok(tMonth).padStart(12)}`);
+}
+
+async function cmdTeam(args: string[]): Promise<void> {
+  const sub = args[0];
+  if (sub === 'join') {
+    const hub = args[1];
+    if (!hub?.startsWith('http')) throw new Error('用法: agentbd team join <http://hub:7787> token=… [name=…] [sharedDailyTokens=…]');
+    const kv = parseKV(args.slice(2));
+    const cfg = {
+      hub: hub.replace(/\/+$/, ''),
+      token: kv.token,
+      name: kv.name ?? machineName(),
+      sharedDailyTokens: kv.sharedDailyTokens ? Number(kv.sharedDailyTokens) : undefined,
+      sharedMonthlyTokens: kv.sharedMonthlyTokens ? Number(kv.sharedMonthlyTokens) : undefined,
+    };
+    await fetchTeam(cfg.hub, cfg.token); // 先验证连通再落配置
+    await saveTeamConfig(cfg);
+    console.log(`已加入团队: hub=${cfg.hub} name=${cfg.name}`);
+    if (cfg.sharedDailyTokens || cfg.sharedMonthlyTokens)
+      console.log(`共享池限额: 今日 ${fmtTok(cfg.sharedDailyTokens ?? 0)} · 本月 ${fmtTok(cfg.sharedMonthlyTokens ?? 0)}（全队合计，超限在任意机器拦截）`);
+    console.log('上报本机用量: agentbd team report（可挂 crontab 每小时跑）');
+  } else if (sub === 'leave') {
+    await clearTeamConfig();
+    console.log('已退出团队（本地配置已删除）');
+  } else if (sub === 'report') {
+    const cfg = await loadTeamConfig();
+    if (!cfg.hub) throw new Error('未加入团队（agentbd team join <hub> token=…）');
+    const st = await checkBudget();
+    const entry: TeamMachine = {
+      machine: machineName(),
+      name: cfg.name ?? machineName(),
+      at: Date.now(),
+      today: st.today,
+      month: st.month,
+    };
+    await postReport(cfg.hub, cfg.token, entry);
+    console.log(`已上报到 ${cfg.hub}: 今日 ${st.today.turns} 轮 / ${fmtTok(st.today.tokens)} tokens`);
+  } else if (sub === 'list') {
+    const cfg = await loadTeamConfig();
+    if (cfg.hub) {
+      const t = await fetchTeam(cfg.hub, cfg.token);
+      printTeamTable(t.machines);
+    } else {
+      const { queryTeamReports } = await import('./store.ts');
+      const st = await checkBudget();
+      const self: TeamMachine = { machine: machineName(), name: cfg.name ?? machineName(), at: Date.now(), today: st.today, month: st.month };
+      const reports = ((await queryTeamReports()) ?? []).filter((r) => r.machine !== self.machine);
+      printTeamTable([self, ...reports]);
+    }
+    const b = await checkBudget();
+    if (b.team) console.log(`共享池: 今日 ${fmtTok(b.team.todayTokens)} tokens · ${b.team.machines} 台机器`);
+  } else if (sub === 'status') {
+    const cfg = await loadTeamConfig();
+    console.log(`配置: ${TEAM_FILE}${cfg.hub ? '' : '（未加入团队）'}`);
+    if (cfg.hub) {
+      console.log(`  hub=${cfg.hub} name=${cfg.name} token=${cfg.token ? '***已配置' : '（无）'}`);
+      try {
+        const t = await fetchTeam(cfg.hub, cfg.token);
+        console.log(`  连通性: ✅ hub 在线，${t.machines.length} 台机器在册`);
+      } catch (e) {
+        console.log(`  连通性: ❌ ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+  } else {
+    console.log('用法: agentbd team join <hub> token=… | report | list | status | leave');
+  }
+}
+
+/* ------------------------------ P2-3 桌面壳 ------------------------------ */
+
+const SHELL_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'shell');
+const PANEL_APP = path.join(homedir(), 'Applications', 'agentbd-panel.app');
+
+async function cmdPanel(args: string[]): Promise<void> {
+  const sub = args[0] ?? 'status';
+  const exists = await access(PANEL_APP).then(() => true, () => false);
+  const build = async (): Promise<void> => {
+    console.log('编译 Swift WebView 壳（swiftc，约 30s）…');
+    const { stdout } = await execAsync('bash', [path.join(SHELL_DIR, 'build.sh'), PANEL_APP]);
+    process.stdout.write(stdout);
+  };
+  if (sub === 'build' || sub === 'install') {
+    await build();
+    console.log(`已生成: ${PANEL_APP}`);
+    if (sub === 'install') {
+      await execAsync('osascript', [
+        '-e',
+        `tell application "System Events" to make login item at end with properties {path:"${PANEL_APP}", hidden:false}`,
+      ]);
+      console.log('已加入登录项（开机自启，托盘常驻红绿灯）');
+    }
+    console.log('启动: open ~/Applications/agentbd-panel.app');
+  } else if (sub === 'open') {
+    if (!exists) await build();
+    await execAsync('open', [PANEL_APP]);
+  } else if (sub === 'uninstall') {
+    await execAsync('osascript', [
+      '-e',
+      `tell application "System Events" to delete (every login item whose path is "${PANEL_APP}")`,
+    ]).catch(() => {});
+    const { rm } = await import('node:fs/promises');
+    await rm(PANEL_APP, { recursive: true, force: true });
+    console.log('已卸载桌面壳');
+  } else {
+    console.log(`App: ${exists ? PANEL_APP : '(未构建)'}`);
+    if (exists) {
+      try {
+        const { stdout } = await execAsync('osascript', [
+          '-e',
+          'tell application "System Events" to get the name of every login item',
+        ]);
+        console.log(`登录项: ${stdout.includes('agentbd-panel') ? '✅ 已注册（开机自启）' : '未注册（agentbd panel install 注册）'}`);
+      } catch {
+        /* 查不到就跳过 */
+      }
+    }
+    console.log('子命令: panel build（编译）· panel install（编译+登录项）· panel open · panel uninstall');
+  }
+}
+
 async function cmdServe(flags: Flags): Promise<void> {
   // —— launchd 按需唤醒安装：不用时系统里没有 agentbd 进程 ——
   const sub = flags._[0];
   if (sub === 'install' || sub === 'uninstall' || sub === 'status') {
     try {
-      if (sub === 'install') await serveInstall(flags.port, flags.idleMin);
+      if (sub === 'install') await serveInstall(flags.port, flags.idleMin, flags.host, flags.token);
       else if (sub === 'uninstall') await serveUninstall();
       else await serveStatus();
     } catch (err) {
@@ -690,6 +859,7 @@ async function cmdServe(flags: Flags): Promise<void> {
       host: flags.host,
       activateFd: flags.fd,
       idleExitMs: flags.fd !== undefined ? flags.idleMin * 60_000 : undefined,
+      token: flags.token,
     });
     console.log(`agentbd 面板已启动: ${url}`);
     console.log('  GET  /            单页面板（引擎 + 服务灯 + MCP）');
@@ -731,6 +901,13 @@ const HELP = `agentbd 0.1.0 —— 多 agent + 本地服务 统一总线（P0 �
                                                        guard 高风险 → 页面内审批（/api/approve）
   agentbd serve install [--port 7787] [--idle 10]      launchd 按需唤醒：零常驻，开页面自动拉起
   agentbd serve uninstall / status                     卸载 / 查看安装状态
+  agentbd panel build / install / open                 P2-3 桌面壳：Swift WKWebView + 托盘红绿灯
+
+  【多机/团队（P2-4）】
+  agentbd serve --host 0.0.0.0 --token <密钥>           hub 模式：LAN 可达 + Bearer 鉴权（必填）
+  agentbd team join <http://hub:7787> token=… [name=…] [sharedDailyTokens=…]
+                                                       spoke 加入团队（共享池限额可选）
+  agentbd team report / list / status / leave          上报本机用量 / 全队视图 / 连通性 / 退出
 
 
   【Agent 层】
@@ -777,6 +954,10 @@ async function main(): Promise<void> {
       return cmdMcp(flags);
     case 'serve':
       return cmdServe(flags);
+    case 'team':
+      return cmdTeam(flags._);
+    case 'panel':
+      return cmdPanel(flags._);
     default:
       console.log(HELP);
   }
