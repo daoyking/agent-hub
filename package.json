@@ -17,6 +17,8 @@
     "serve": "node src/cli.ts serve",
     "ui-verify": "node scripts/ui-verify.mjs",
     "lamp-test": "bash shell/lamp-test.sh",
+    "failover-test": "node --import tsx scripts/failover-test.mjs",
+    "test": "npm run typecheck && npm run failover-test",
     "typecheck": "tsc --noEmit"
   },
   "engines": {

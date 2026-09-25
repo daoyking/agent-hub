@@ -201,30 +201,20 @@ class TerminalRegistry {
 }
 
 /**
- * 认证/配额类失败的分类。
+ * 引擎失败分类与降级决策（**纯函数，无 I/O**，单测见 scripts/failover-test.mjs）。
  *
- * agnesd（goose fork）把多种上游失败统一映射成 ACP -32000
+ * 背景：agnesd（goose fork）把多种上游失败统一映射成 ACP -32000
  * "Authentication required"，客户端只看得到这一句，真实原因藏在
- * ~/.agnes/state/logs/server/**-agnesd.log 里。实测（2026-09-25）过两类：
+ * ~/.agnes/state/logs/server/**-agnesd.log 里。实测（2026-09-25）两类：
  *  - 余额类（换模型可解）：403 `insufficient_user_quota` / `Failed to pre-consume
  *    quota`。agnes-2.0-flash 不做预扣校验，所以降级后能跑。
  *  - 速率类（只能等）：`Rate limit exceeded ... for free users`——与余额无关，
- *    是免费额度的**时间窗**限制，充值也解不掉（那是 Token Plan 订阅档位），
- *    等窗口重置即可。实测同一分钟内 3 次调用有 1 次成功。
+ *    是免费额度的**时间窗**限制，充值也解不掉（那是 Token Plan 订阅档位）。
+ *    实测同一分钟内 3 次调用有 1 次成功。
  */
-function isRateLimited(msg: string): boolean {
-  return /rate limit/i.test(msg);
-}
-
-function isAuthOrQuotaFailure(msg: string): boolean {
-  return (
-    isRateLimited(msg) ||
-    /Authentication required|insufficient_user_quota|pre-consume quota|Invalid token|\b40[13]\b/i.test(msg)
-  );
-}
 
 /** 降级模型链：余额类失败时按顺序降级（都不可用则原样抛错） */
-const GENERIC_MODEL_FALLBACKS: Record<string, string[]> = {
+export const GENERIC_MODEL_FALLBACKS: Record<string, string[]> = {
   agnes: ['agnes-2.0-flash', 'agnes-2.5-flash'],
 };
 
@@ -237,10 +227,22 @@ const GENERIC_MODEL_FALLBACKS: Record<string, string[]> = {
  * 因此默认只做一次短退避（够覆盖瞬时抖动），不把 CLI 挂几分钟；
  * 想长等就显式调 AGENTBD_RATE_RETRIES。
  */
-const RATE_LIMIT_BACKOFF_SEC = [8, 20, 45, 60] as const;
-const RATE_LIMIT_MAX_ATTEMPTS = Number(process.env.AGENTBD_RATE_RETRIES ?? '1') + 1;
+export const RATE_LIMIT_BACKOFF_SEC = [8, 20, 45, 60] as const;
 
-const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+export function rateLimitMaxAttempts(env: NodeJS.ProcessEnv = process.env): number {
+  return Number(env.AGENTBD_RATE_RETRIES ?? '1') + 1;
+}
+
+export function isRateLimited(msg: string): boolean {
+  return /rate limit/i.test(msg);
+}
+
+export function isAuthOrQuotaFailure(msg: string): boolean {
+  return (
+    isRateLimited(msg) ||
+    /Authentication required|insufficient_user_quota|pre-consume quota|Invalid token|\b40[13]\b/i.test(msg)
+  );
+}
 
 /**
  * 识别「软失败」：引擎**没有抛异常**，但把上游错误写进正文后正常收尾。
@@ -251,10 +253,36 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
  * 这种回合 stopReason 仍是 end_turn，CLI/UI 看起来像成功，**必须特判**，
  * 否则失败会被静默当成正常结果返回。
  */
-function softFailureOf(result: TurnResult): string | undefined {
-  if (!/Ran into this error/i.test(result.text)) return undefined;
-  return result.text;
+export function softFailureOf(text: string): string | undefined {
+  if (!/Ran into this error/i.test(text)) return undefined;
+  return text;
 }
+
+/** 取出下一档退避秒数（超出档位则用最后一档封顶） */
+export function backoffSec(attempt: number): number {
+  const i = Math.min(Math.max(attempt, 1), RATE_LIMIT_BACKOFF_SEC.length) - 1;
+  return RATE_LIMIT_BACKOFF_SEC[i] ?? 60;
+}
+
+/** 选下一个降级模型（已试过的不再选；没有则 null = 该抛原始错误了） */
+export function nextFallback(engineId: string, tried: ReadonlySet<string>): string | null {
+  return (GENERIC_MODEL_FALLBACKS[engineId] ?? []).find((m) => !tried.has(m)) ?? null;
+}
+
+/** 重试耗尽时给用户看的错误：要说明「不是余额问题」并给出可操作出路 */
+export function rateLimitExhaustedMsg(engineId: string, attempts: number, raw: string): string {
+  return (
+    `${engineId} 撞上 apihub 免费额度的速率限制（已重试 ${attempts} 次）。\n` +
+    `这不是余额问题——充值也解不掉（需 Token Plan 订阅）。该限制按请求量计，` +
+    `偶发可成功，密集调用必被限。三个选择：\n` +
+    `  1) 隔几分钟再跑同一条命令（能否成功取决于窗口）\n` +
+    `  2) 换引擎: agentbd ask <claude|codex|gemini|...> '...'\n` +
+    `  3) 想多等几轮: AGENTBD_RATE_RETRIES=5 agentbd ask ...\n` +
+    `原始错误: ${raw.split('\n')[0]}`
+  );
+}
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
   const fallbacks = GENERIC_MODEL_FALLBACKS[opts.spec.id] ?? [];
@@ -272,7 +300,7 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
         // ⚠️ agnesd/goose 把上游失败写进**正文**再正常 end_turn，不是抛异常：
         //    "Ran into this error: Rate limit exceeded: ..." + stop=end_turn。
         //    不特判的话，失败回合会被当成成功结果返回给用户（CLI 还显示 stop=end_turn）。
-        failure = softFailureOf(result);
+        failure = softFailureOf(result.text);
         if (!failure) return result;
       } catch (err) {
         failure = err instanceof Error ? err.message : String(err);
@@ -283,19 +311,10 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
       // ① 速率限制：模型换也没用，原地退避重试
       if (isRateLimited(failure)) {
         rateAttempts++;
-        if (rateAttempts >= RATE_LIMIT_MAX_ATTEMPTS) {
-          throw new Error(
-            `${opts.spec.id} 撞上 apihub 免费额度的速率限制（已重试 ${rateAttempts} 次）。\n` +
-              `这不是余额问题——充值也解不掉（需 Token Plan 订阅）。该限制按请求量计，` +
-              `偶发可成功，密集调用必被限。三个选择：\n` +
-              `  1) 隔几分钟再跑同一条命令（能否成功取决于窗口）\n` +
-              `  2) 换引擎: agentbd ask <claude|codex|gemini|...> '...'\n` +
-              `  3) 想多等几轮: AGENTBD_RATE_RETRIES=5 agentbd ask ...\n` +
-              `原始错误: ${failure.split('\n')[0]}`,
-          );
+        if (rateAttempts >= rateLimitMaxAttempts()) {
+          throw new Error(rateLimitExhaustedMsg(opts.spec.id, rateAttempts, failure));
         }
-        const wait =
-          RATE_LIMIT_BACKOFF_SEC[Math.min(rateAttempts, RATE_LIMIT_BACKOFF_SEC.length) - 1] ?? 60;
+        const wait = backoffSec(rateAttempts);
         opts.onEvent?.({
           k: 'notice',
           level: 'warn',
@@ -306,7 +325,7 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
       }
 
       // ② 余额/密钥类：换更便宜的模型
-      const next = fallbacks.find((m) => !triedModels.has(m));
+      const next = nextFallback(opts.spec.id, triedModels);
       if (!next) throw new Error(failure);
       triedModels.add(next);
       process.env.AGNES_MODEL = next;

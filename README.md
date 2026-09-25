@@ -328,7 +328,21 @@ $ agentbd serve uninstall  # 一键还原
 
 - `--json` 事件流里不含任何凭据：凭证只由各引擎自己从 Keychain / 自己的配置读取。
 - **CI 跑不了 `doctor`**：它要的是本机已登录的引擎（claude/codex/gemini/codebuddy/qoder）
-  和真实 spawn。CI 里只能跑 `npm run typecheck`；`doctor`/`ask` 属于本机自检命令。
+  和真实 spawn。CI 里只能跑 `npm test`；`doctor`/`ask` 属于本机自检命令。
+
+### 验证套件
+
+| 命令 | 覆盖 | 需要真实引擎 |
+|---|---|---|
+| `npm test` | `tsc --noEmit` + `failover-test`（降级/重试纯逻辑 42 项） | ❌ 可进 CI |
+| `npm run failover-test` | 软失败检测、失败分类、退避档位、模型降级链、耗尽提示 | ❌ |
+| `npm run ui-verify` | 面板 DOM 断言 17 项（真实 ui.html + jsdom + 真实 SSE） | ⚠️ 需先起 `serve` |
+| `npm run lamp-test` | 托盘灯色判定 8 项（Swift 联合编译） | ❌ |
+| `node src/cli.ts doctor` | 6 引擎握手 + 能力探测 | ✅ 需本机已登录 |
+
+`failover-test` 的样例**全部取自实测日志**（`~/.agnes/state/logs/server/**-agnesd.log`），
+重点锁住「软失败」——agnesd 把上游错误写进正文再 `end_turn`，不特判就会把失败回合
+静默当成功返回。这类 bug 静默且难复现，必须有回归。
 
 ## 下一步
 
