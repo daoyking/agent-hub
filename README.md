@@ -178,13 +178,43 @@ ACP 扩展方法 _agnes/unstable/providers/custom/update
 config.yaml active_provider: custom_agneshub（GUI 与 agentbd 同源）
 ```
 
-- **零 env `ask agnes` 全通**：回复真实内容、stop=end_turn、transcript 落盘、用量可读。
+- ~~**零 env `ask agnes` 全通**：回复真实内容、stop=end_turn、transcript 落盘、用量可读。~~
+  （2026-09-25 修正：当时能用是因为余额充足。现在 apihub 免费额度受限，见 9b。）
 - 弯路清单（勿重复）：config.yaml 直写不进运行时；`AGNES_AI_API_KEY`/`AGNES_API_URL`/`OPENAI_API_KEY`
   env 注入对 custom provider 无效；`config/save` 拒绝任意字段名；`OPENAI_CUSTOM_HEADERS` 能存进
   secret store 但运行时不合并；`env_vars[].default` 不进请求，且写坏类型会让 provider 加载失败。
 - **事故教训**：custom provider JSON（`~/.agnes/config/custom_providers/*.json`）只能由 ACP 方法改——
   手工 `JSON.parse→stringify` 重写曾与服务端写入竞态，把刚注册的 apiKey 状态抹掉（全线 401），
   重新 `custom/update` 后恢复。
+
+### 9b. `Authentication required` 排障实录（2026-09-25）：三连坑
+
+P2 收官时被 agnes 的 `Authentication required` 卡住，逐层证伪后发现**三个独立问题叠在一起**，
+而 agnesd 把它们**全部映射成同一句 ACP -32000 "Authentication required"**，极具误导性。
+
+| 层 | 真实原因 | 修法 |
+|---|---|---|
+| ① 钥匙串 | keyring 迁移（`agnes` → `com.agnes.code.secrets`）只搬了 1 个条目，`CUSTOM_AGNESHUB_API_KEY` 留在旧 service，新版 agnesd 读不到 | `registry.agnesSecretEnv()` 读**两个** service，按 provider 声明的 `api_key_env` 补 env |
+| ② ACP 协议 | `initialize` 声明了 `authMethods: agnes-provider`，但客户端没调 `authenticate` | `bus.runTurn` 在 `session/new` **之前**调 `authenticate` |
+| ③ 上游账户 | 密钥有效（`/v1/models` 200），但 `agnes-2.5-pro` 要**预扣** $0.0108 > 余额 $0.00194 | 降级到 `agnes-2.0-flash`（不做预扣校验） |
+
+**排障顺序（下次照做）**：
+1. `~/.agnes/state/logs/server/**-agnesd.log` —— **真实 HTTP 状态与 body 都在这里**，ACP 那边只有一句废话；
+2. `curl https://apihub.agnes-ai.cn/v1/models -H "Authorization: Bearer $KEY"` —— 区分「密钥无效」还是「账户问题」；
+3. 再动 provider 配置。（前两步 10 秒内能定位，绕了三个小时。）
+
+**关键机制：软失败**。agnesd 把上游失败写进**正文**再正常 `end_turn`：
+```
+✔ call_3e5da715 ok
+Ran into this error: Rate limit exceeded: …      ← stop=end_turn，CLI 看起来像成功
+```
+`bus.softFailureOf()` 特判 `Ran into this error` 把它归入降级/重试管线，否则失败回合会被静默当成功返回。
+
+**免费额度的两道墙**（充值是错误方向）：
+- 余额预扣 → 换 flash 模型可解；
+- `rate limit for free users` → **充值也解不掉**（需 Token Plan 订阅），按请求量计、偶发可成功、密集调用必被限。
+  故默认只退避一次（8s），`AGENTBD_RATE_RETRIES` 可调；耗尽后抛**可操作**错误（换引擎 / 等窗口 / 调参）。
+- agentbd 驱 Agnes 适合**低频、隔几分钟一次**；密集调用应切 claude/codex/gemini。
 
 ### 10. 会话恢复：`ask --resume`（session/load）
 
@@ -274,6 +304,8 @@ $ agentbd serve uninstall  # 一键还原
 ## 安全边界（P0 已实现）
 
 - `AGENTBD_DEPTH` 守卫：**禁止 agent 套 agent**（Agnes/WorkBuddy 内部也会拉起别的 agent，会翻倍消耗）。
+- `AGENTBD_RATE_RETRIES`：撞上免费额度速率限制时的重试轮数（默认 `1`；`0` = 不重试直接报错）。
+- `AGENTBD_DEBUG_AUTH=1`：打印 ACP `authenticate` 的结果/错误，排查引擎认证握手用。
 - client `fs` 能力白名单：`fs/read_text_file`、`fs/write_text_file` 只允许在 `--cwd` 根目录内活动。
 - 诚实能力声明：P0 未实现 ACP 终端 → `terminal: false`（而不是宣告后报错）。
 - 审批三模式 + 每条审批留痕（`result.approvals`）。

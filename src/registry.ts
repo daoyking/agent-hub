@@ -8,6 +8,7 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,7 +23,11 @@ export type EngineSpec = {
   /** 可执行文件；默认取 process.execPath（node）之外的原生命令 */
   command: string;
   args: string[];
-  env?: Record<string, string>;
+  /**
+   * 追加 env。可以是函数（**懒求值**）——agnes 的密钥要从钥匙串读，
+   * 不能让每次 `agentbd engines` 之类的命令都去碰 keychain。
+   */
+  env?: Record<string, string> | (() => Record<string, string>);
   /** 接入方式：acp=原生 ACP；acp-adapter=npx 适配器；acp-service=起本地服务再连 wss（agnesd） */
   channel: 'acp' | 'acp-adapter' | 'acp-service';
   /** channel=acp-service 专用：如何把服务拉起并连上 ACP */
@@ -128,16 +133,114 @@ export const BUILTIN_ENGINES: EngineSpec[] = [
       path: '/acp',
       fingerprintPrefix: 'GOOSED_CERT_FINGERPRINT=',
     },
-    authHint: 'provider/model 与 GUI 同源（~/.agnes/config/config.yaml 的 active_provider）；真实回合需要已配置的 provider',
-    env: {
-      // 实测：不注入这两个 env，session/prompt 报 "Provider not set"
-      // （desktop 启动 agnesd 时同样注入；这里从 config.yaml 活读，用户在 GUI
-      //  里切换 provider（如自定义 apihub provider）后 agentbd 自动保持一致）
-      ...agnesDefaults(),
-    },
+    authHint: 'provider/model 与 GUI 同源（~/.agnes/config/config.yaml 的 active_provider）；真实回合需要该 provider 的密钥',
+    env: () => ({ ...agnesDefaults(), ...agnesSecretEnv() }),
     note: 'agnesd = goose-server 1.62.6 fork：本地 HTTPS + wss://…/acp?token=（非 stdio，实测 2026-09-23）',
   },
 ];
+
+/* --------------------- Agnes 凭据（钥匙串 → provider env） --------------------- */
+
+/**
+ * AgnesCode 的密钥库 service 名。**两个都要看**：
+ *  - 新版 `com.agnes.code.secrets`（keyring 迁移后的目标）
+ *  - 旧版 `agnes`（迁移源）
+ * 实测（2026-09-25）：迁移只搬了 1 个条目（`AGNES_AI_API_KEY`），用户自定义
+ * provider 的 key（如 `CUSTOM_AGNESHUB_API_KEY`）**留在了旧 service**；而新版
+ * agnesd 只读新 service → agnesd 拿不到 key，ACP 层把失败统一包装成
+ * "Authentication required"（-32000），极具误导性。
+ * 两个 service 都读并按 provider 声明的 api_key_env 补 env，绕开这个迁移缺口。
+ *
+ * 注意：补上 key 之后仍可能认证失败，**别把它当万能钥匙**。实测（2026-09-25）
+ * 钥匙齐全时 apihub 的真实响应是 403 "Failed to pre-consume quota, remaining:
+ * $0.001942, required: $0.010800"——账户余额不足，而 ACP 仍报同一句
+ * "Authentication required"。排查顺序：先看 ~/.agnes/state/logs/server/ 下的
+ * agnesd 日志（那里有真实 HTTP 状态与 body），再动 provider 配置。
+
+ * provider 的 key（如 `CUSTOM_AGNESHUB_API_KEY`）**留在了旧 service**；而新版
+ * agnesd 只读新 service → session/prompt 直接报 "Authentication required"。
+ * 两个 service 都读并按 provider 声明的 api_key_env 补 env，绕开这个迁移缺口。
+ */
+const AGNES_KEYRING_SERVICES = ['com.agnes.code.secrets', 'agnes'];
+
+function keychainSecrets(service: string): Record<string, string> {
+  // 优先尝试 -w（直接 stdout 打印密码）
+  const resW = spawnSync(
+    'security',
+    ['find-generic-password', '-s', service, '-a', 'secrets', '-w'],
+    { encoding: 'utf8', timeout: 2000 },
+  );
+  if (resW.status === 0 && resW.stdout?.trim()) {
+    try {
+      const j = JSON.parse(resW.stdout.trim()) as unknown;
+      if (j && typeof j === 'object') return j as Record<string, string>;
+    } catch {}
+  }
+
+  // 若 -w 触发权限确认或挂起，尝试 -g（非交互模式，密码通常在 stderr 打印）
+  const resG = spawnSync(
+    'security',
+    ['find-generic-password', '-s', service, '-a', 'secrets', '-g'],
+    { encoding: 'utf8', timeout: 2000 },
+  );
+  const stderr = resG.stderr || '';
+  const m = stderr.match(/password:\s*(?:0x[0-9a-fA-F]+\s+)?"(.*)"/);
+  if (m) {
+    try {
+      const raw = m[1].replace(/\\134/g, '\\');
+      const j = JSON.parse(raw) as unknown;
+      if (j && typeof j === 'object') return j as Record<string, string>;
+    } catch {}
+  }
+
+  return {}; // 未授权/条目不存在 → 静默（authHint 会提示）
+}
+
+/** 自定义 provider 定义（~/.agnes/config/custom_providers/<name>.json） */
+function readCustomProvider(provider: string): {
+  api_key_env?: string;
+  models?: Array<{ name: string }>;
+} | null {
+  try {
+    return JSON.parse(
+      readFileSync(path.join(os.homedir(), '.agnes/config/custom_providers', `${provider}.json`), 'utf8'),
+    ) as { api_key_env?: string; models?: Array<{ name: string }> };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 当前 active_provider 需要的密钥 env + 钥匙串补齐。
+ * shell 已给的 env 一律尊重（不覆盖）；读不到 secret 就返回空（由 agnesd 报错，
+ * 上层 doctor 会显示 authHint）。
+ */
+function agnesSecretEnv(): Record<string, string> {
+  const provider = process.env.AGNES_DEFAULT_PROVIDER ?? activeProvider();
+  const keyEnv = provider === 'agnes' ? 'AGNES_AI_API_KEY' : readCustomProvider(provider)?.api_key_env;
+  if (!keyEnv || process.env[keyEnv]) return {};
+  const secrets = AGNES_KEYRING_SERVICES.reduce<Record<string, string>>(
+    (acc, svc) => Object.assign(acc, keychainSecrets(svc)),
+    {},
+  );
+  const out: Record<string, string> = {};
+  if (secrets[keyEnv]) out[keyEnv] = secrets[keyEnv]!;
+  // 自定义 provider 常需要额外 header（goose 读 OPENAI_CUSTOM_HEADERS）
+  if (provider !== 'agnes' && secrets.OPENAI_CUSTOM_HEADERS) {
+    out.OPENAI_CUSTOM_HEADERS = secrets.OPENAI_CUSTOM_HEADERS;
+  }
+  return out;
+}
+
+/** config.yaml 的 active_provider（GUI 里选的 provider，agentbd 与它保持一致） */
+function activeProvider(): string {
+  try {
+    const yaml = readFileSync(path.join(os.homedir(), '.agnes/config/config.yaml'), 'utf8');
+    return yaml.match(/^active_provider:\s*(\S+)/m)?.[1] ?? 'agnes';
+  } catch {
+    return 'agnes';
+  }
+}
 
 /**
  * agnes 默认 provider/model——与 AgnesCode GUI 同源：
@@ -188,9 +291,10 @@ export function engineEnv(spec: EngineSpec): Record<string, string> {
     if (typeof v === 'string') env[k] = v;
   }
   env.PATH = buildPath();
+  const specEnv = typeof spec.env === 'function' ? spec.env() : (spec.env ?? {});
   // spec.env 是「默认值」，shell/调用方环境可覆盖（否则用户传的
   // AGNES_DEFAULT_PROVIDER 会被静态默认值吃掉）
-  return { ...(spec.env ?? {}), ...env };
+  return { ...specEnv, ...env };
 }
 
 export function findEngine(id: string, engines: EngineSpec[] = loadEngines()): EngineSpec | undefined {

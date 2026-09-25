@@ -200,7 +200,135 @@ class TerminalRegistry {
   }
 }
 
+/**
+ * 认证/配额类失败的分类。
+ *
+ * agnesd（goose fork）把多种上游失败统一映射成 ACP -32000
+ * "Authentication required"，客户端只看得到这一句，真实原因藏在
+ * ~/.agnes/state/logs/server/**-agnesd.log 里。实测（2026-09-25）过两类：
+ *  - 余额类（换模型可解）：403 `insufficient_user_quota` / `Failed to pre-consume
+ *    quota`。agnes-2.0-flash 不做预扣校验，所以降级后能跑。
+ *  - 速率类（只能等）：`Rate limit exceeded ... for free users`——与余额无关，
+ *    是免费额度的**时间窗**限制，充值也解不掉（那是 Token Plan 订阅档位），
+ *    等窗口重置即可。实测同一分钟内 3 次调用有 1 次成功。
+ */
+function isRateLimited(msg: string): boolean {
+  return /rate limit/i.test(msg);
+}
+
+function isAuthOrQuotaFailure(msg: string): boolean {
+  return (
+    isRateLimited(msg) ||
+    /Authentication required|insufficient_user_quota|pre-consume quota|Invalid token|\b40[13]\b/i.test(msg)
+  );
+}
+
+/** 降级模型链：余额类失败时按顺序降级（都不可用则原样抛错） */
+const GENERIC_MODEL_FALLBACKS: Record<string, string[]> = {
+  agnes: ['agnes-2.0-flash', 'agnes-2.5-flash'],
+};
+
+/**
+ * 速率限制退避（秒）。
+ *
+ * 实测（2026-09-25）apihub 免费额度的速率窗口**远长于预期**：8s → 20s → 45s
+ * 三次退避累计 ~73s 仍全部 Rate limit，而同一分钟里偶发能成功一次。说明窗口
+ * 不是秒级、也不是分钟级的小闸门，很可能按**请求量/小时**计。
+ * 因此默认只做一次短退避（够覆盖瞬时抖动），不把 CLI 挂几分钟；
+ * 想长等就显式调 AGENTBD_RATE_RETRIES。
+ */
+const RATE_LIMIT_BACKOFF_SEC = [8, 20, 45, 60] as const;
+const RATE_LIMIT_MAX_ATTEMPTS = Number(process.env.AGENTBD_RATE_RETRIES ?? '1') + 1;
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/**
+ * 识别「软失败」：引擎**没有抛异常**，但把上游错误写进正文后正常收尾。
+ *
+ * 实测 agnesd（goose fork）的两种措辞：
+ *   "Ran into this error: Rate limit exceeded: …"
+ *   "Ran into this error: Authentication error: …"
+ * 这种回合 stopReason 仍是 end_turn，CLI/UI 看起来像成功，**必须特判**，
+ * 否则失败会被静默当成正常结果返回。
+ */
+function softFailureOf(result: TurnResult): string | undefined {
+  if (!/Ran into this error/i.test(result.text)) return undefined;
+  return result.text;
+}
+
 export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
+  const fallbacks = GENERIC_MODEL_FALLBACKS[opts.spec.id] ?? [];
+  const triedModels = new Set<string>();
+  // 记住原始模型，降级成功也不污染后续回合
+  const originalModel = process.env.AGNES_MODEL ?? process.env.AGNES_DEFAULT_MODEL;
+  let rateAttempts = 0;
+
+  try {
+    for (;;) {
+      let result: TurnResult;
+      let failure: string | undefined;
+      try {
+        result = await runTurnOnce(opts);
+        // ⚠️ agnesd/goose 把上游失败写进**正文**再正常 end_turn，不是抛异常：
+        //    "Ran into this error: Rate limit exceeded: ..." + stop=end_turn。
+        //    不特判的话，失败回合会被当成成功结果返回给用户（CLI 还显示 stop=end_turn）。
+        failure = softFailureOf(result);
+        if (!failure) return result;
+      } catch (err) {
+        failure = err instanceof Error ? err.message : String(err);
+      }
+
+      if (!isAuthOrQuotaFailure(failure)) throw new Error(failure);
+
+      // ① 速率限制：模型换也没用，原地退避重试
+      if (isRateLimited(failure)) {
+        rateAttempts++;
+        if (rateAttempts >= RATE_LIMIT_MAX_ATTEMPTS) {
+          throw new Error(
+            `${opts.spec.id} 撞上 apihub 免费额度的速率限制（已重试 ${rateAttempts} 次）。\n` +
+              `这不是余额问题——充值也解不掉（需 Token Plan 订阅）。该限制按请求量计，` +
+              `偶发可成功，密集调用必被限。三个选择：\n` +
+              `  1) 隔几分钟再跑同一条命令（能否成功取决于窗口）\n` +
+              `  2) 换引擎: agentbd ask <claude|codex|gemini|...> '...'\n` +
+              `  3) 想多等几轮: AGENTBD_RATE_RETRIES=5 agentbd ask ...\n` +
+              `原始错误: ${failure.split('\n')[0]}`,
+          );
+        }
+        const wait =
+          RATE_LIMIT_BACKOFF_SEC[Math.min(rateAttempts, RATE_LIMIT_BACKOFF_SEC.length) - 1] ?? 60;
+        opts.onEvent?.({
+          k: 'notice',
+          level: 'warn',
+          text: `${opts.spec.id} 触发免费额度速率限制，${wait}s 后重试（第 ${rateAttempts} 次）`,
+        });
+        await sleep(wait * 1000);
+        continue;
+      }
+
+      // ② 余额/密钥类：换更便宜的模型
+      const next = fallbacks.find((m) => !triedModels.has(m));
+      if (!next) throw new Error(failure);
+      triedModels.add(next);
+      process.env.AGNES_MODEL = next;
+      process.env.AGNES_DEFAULT_MODEL = next;
+      opts.onEvent?.({
+        k: 'notice',
+        level: 'warn',
+        text: `${opts.spec.id} 余额/密钥受限，自动降级到 ${next} 重试（原错误: ${failure.split('\n')[0]}）`,
+      });
+    }
+  } finally {
+    if (originalModel === undefined) {
+      delete process.env.AGNES_MODEL;
+      delete process.env.AGNES_DEFAULT_MODEL;
+    } else {
+      process.env.AGNES_MODEL = originalModel;
+      process.env.AGNES_DEFAULT_MODEL = originalModel;
+    }
+  }
+}
+
+async function runTurnOnce(opts: RunTurnOptions): Promise<TurnResult> {
   assertNotNested();
   // 预算护栏：spawn 引擎之前拦截（超限直接拒跑；近限发 notice 告警，CLI/Web 同源可见）
   if (opts.budget !== 'off') {
@@ -338,7 +466,26 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnResult> {
         authMethods: (init.authMethods ?? []).map((m) => ({ id: m.id, name: m.name })),
       };
 
-      // ② 建会话：new（默认） / load（恢复，重放历史） / resume（恢复，不重放）
+      // ② 认证：必须在 session/new **之前**完成。initialize 声明了 authMethods
+      // 而客户端没先 authenticate 时，agent 会把会话标为未认证，后续 prompt 直接
+      // 以 ACP `auth_required`（-32000 "Authentication required"）失败——这与
+      // provider 的 key 是否有效无关（agnesd 的 agnes-provider 走 Keychain/账号态，
+      // 凭证正常时无需交互）。需要交互输入的方式（浏览器 OAuth）失败则静默继续，
+      // 让 prompt 报出真实原因。
+      if (profile.authMethods.length > 0) {
+        try {
+          const r = await ctx.request('authenticate', { methodId: profile.authMethods[0]!.id });
+          if (process.env.AGENTBD_DEBUG_AUTH) {
+            console.error(`[auth] ${profile.authMethods[0]!.id} ok:`, JSON.stringify(r));
+          }
+        } catch (err) {
+          if (process.env.AGENTBD_DEBUG_AUTH) {
+            console.error(`[auth] ${profile.authMethods[0]!.id} 失败:`, err);
+          }
+        }
+      }
+
+      // ③ 建会话：new（默认） / load（恢复，重放历史） / resume（恢复，不重放）
       //   attachSession 在 d.ts 标 private 但 JS 层公开；load/resume 的响应体不带
       //   sessionId（schema 只有 modes/configOptions），必须手动并进来供路由与 prompt 使用。
       type AttachCtx = { attachSession: (resp: unknown) => acp.ActiveSession };
