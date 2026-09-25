@@ -189,6 +189,22 @@ const checks = [
   ['diff 删除/新增行渲染', document.querySelectorAll('.diff .del').length >= 1 && document.querySelectorAll('.diff .add').length >= 1],
   ['diff 前后缀裁剪提示', document.querySelectorAll('.diff .ctx').length >= 2],
   ['页面 JS 零错误', pageErrors.length === 0],
+  // —— 布局（2026-09-25 面板改版）——
+  // jsdom 不会把 `overflow:hidden` 拆成 overflow-x/y（真实浏览器会），两种都认
+  ['① body 不滚动（只有左栏滚）', (() => {
+    const cs = dom.window.getComputedStyle(document.body);
+    return cs.overflowY === 'hidden' || cs.overflow === 'hidden';
+  })()],
+  ['① 左栏自滚', dom.window.getComputedStyle(document.querySelector('aside')).overflowY === 'auto'],
+  ['② 输入框在对话区下方(#composer)', (() => {
+    const ev = document.getElementById('events').getBoundingClientRect();
+    const cp = document.getElementById('composer').getBoundingClientRect();
+    return cp.top >= ev.bottom - 1; // composer 顶边不低于事件区底边
+  })()],
+  ['② 对话区在输入框上方', document.getElementById('events').getBoundingClientRect().bottom <= document.getElementById('composer').getBoundingClientRect().top + 1],
+  ['② 顶栏含引擎选择与状态', !!document.getElementById('topbar')?.querySelector('#engine') && !!document.getElementById('status')],
+  ['③ 服务列表显示未登记标记', document.querySelectorAll('#services em.undecl').length >= 0],
+  ['③ 服务汇总行（总数/已登记/现场发现）', !!document.querySelector('#services .row.total')],
 ];
 console.log('\n=== 断言表 ===');
 let fail = 0;

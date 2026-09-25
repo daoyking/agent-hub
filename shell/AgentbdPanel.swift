@@ -19,6 +19,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     private var window: NSWindow!
     private var webView: WKWebView!
     private var statusItem: NSStatusItem!
+    private var lampColor: NSColor = .systemGreen
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // 主窗口 = 面板 WebView
@@ -36,7 +37,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
 
-        // 托盘：彩色圆点 + 菜单
+        // 托盘：template 图标 + 灯色点（比文字 "● agentbd" 省菜单栏宽度）
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         setLamp("green")
         let menu = NSMenu()
@@ -66,13 +67,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     @objc private func quit() { NSApp.terminate(nil) }
 
     private func setLamp(_ lamp: String) {
-        let color: NSColor =
+        lampColor =
             lamp == "red" ? .systemRed
             : lamp == "amber" ? .systemOrange
             : .systemGreen
-        statusItem.button?.attributedTitle = NSAttributedString(
-            string: "● agentbd",
-            attributes: [.foregroundColor: color, .font: NSFont.systemFont(ofSize: 12)])
+        guard let button = statusItem.button else { return }
+        // 灯点画成小圆点叠在图标右下角；菜单栏图标的颜色是灯位的唯一载体
+        let dotColor = lampColor // 闭包外取一次，避免在 escaping 闭包里捕获 self
+        let dot = NSImage(size: NSSize(width: 6, height: 6), flipped: false) { rect in
+            let path = NSBezierPath(ovalIn: rect.insetBy(dx: 0.5, dy: 0.5))
+            dotColor.setFill()
+            path.fill()
+            NSColor.black.setStroke() // 深色描边：任何菜单栏底色下都看得清
+            path.lineWidth = 1
+            path.stroke()
+            return true
+        }
+        if let base = loadTemplateIcon() {
+            let composed = NSImage(size: base.size, flipped: false) { _ in
+                base.draw(in: NSRect(origin: .zero, size: base.size))
+                dot.draw(in: NSRect(x: base.size.width - 8, y: -2, width: 6, height: 6))
+                return true
+            }
+            button.image = composed
+        } else {
+            button.image = dot
+            button.image?.isTemplate = false
+        }
+    }
+
+    /// 菜单栏 template 图标（单色，系统按深浅色菜单栏自动反相）
+    private func loadTemplateIcon() -> NSImage? {
+        guard let url = Bundle.main.url(forResource: "menubar", withExtension: "png"),
+              let img = NSImage(contentsOf: url) else { return nil }
+        img.size = NSSize(width: 18, height: 18) // 固定逻辑尺寸（@2x 交给系统选）
+        return img
     }
 
     private func pollLamp() {

@@ -29,6 +29,24 @@ export type AgentProcess = {
 
 const STDERR_LIMIT = 4000;
 
+/**
+ * spawn 的 'error' 事件是**异步**的：ENOENT（路径不存在/应用被卸载）、EACCES
+ * 等不会让 spawn() 同步抛，而是稍后 emit 'error'。不挂监听器的话 Node 视为
+ * unhandled 'error' 直接把整个进程带崩——一个引擎的二进制没了，却让 doctor
+ * 和其它引擎的结果一起消失。
+ *
+ * 这里把首次错误记下来并让流以可读错误结束，由上层 try/catch 转成 ProbeResult。
+ */
+function guardSpawnError(child: ReturnType<typeof spawn>, label: string): { firstError: () => Error | null } {
+  let first: Error | null = null;
+  child.on('error', (err) => {
+    const e = err as NodeJS.ErrnoException;
+    const where = e.code === 'ENOENT' ? `${label} 不存在（${e.path ?? '?'}）` : `${label} 启动失败：${e.message}`;
+    first ??= new Error(where);
+  });
+  return { firstError: () => first };
+}
+
 export async function launch(spec: EngineSpec, opts: { cwd?: string } = {}): Promise<AgentProcess> {
   if (spec.channel === 'acp-service') return launchService(spec, opts);
   const child = spawn(spec.command, spec.args, {
@@ -36,6 +54,7 @@ export async function launch(spec: EngineSpec, opts: { cwd?: string } = {}): Pro
     env: engineEnv(spec),
     stdio: ['pipe', 'pipe', 'pipe'],
   });
+  const guard = guardSpawnError(child, spec.id);
 
   let stderr = '';
   child.stderr?.on('data', (d: Buffer) => {
@@ -45,6 +64,18 @@ export async function launch(spec: EngineSpec, opts: { cwd?: string } = {}): Pro
   if (!child.stdin || !child.stdout) {
     throw new Error(`无法获取 ${spec.id} 的 stdio（spawn 失败？）`);
   }
+  // spawn 异步失败（ENOENT/EACCES）时立刻抛出，别让调用方空等到握手超时
+  await Promise.race([
+    new Promise<void>((r) => child.once('spawn', () => r())),
+    new Promise<void>((_, rej) => {
+      const t = setTimeout(() => rej(guard.firstError() ?? new Error(`${spec.id} 启动超时`)), 3000);
+      child.once('error', () => {
+        clearTimeout(t);
+        rej(guard.firstError() ?? new Error(`${spec.id} 启动失败`));
+      });
+      child.once('spawn', () => clearTimeout(t));
+    }),
+  ]);
 
   const stream = acp.ndJsonStream(
     Writable.toWeb(child.stdin) as WritableStream<Uint8Array>,
@@ -119,6 +150,26 @@ async function launchService(spec: EngineSpec, opts: { cwd?: string } = {}): Pro
     env,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  const guard = guardSpawnError(child, spec.id);
+
+  // 与 stdio 分支同理：ENOENT/EACCES 是异步 'error'，必须先等它落地，
+  // 否则后面拿 stdout 去握手只会空等到超时，而 'error' 无人监听还会崩进程。
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error(`${spec.id} 启动超时（3s）`)), 3000);
+      child.once('spawn', () => {
+        clearTimeout(t);
+        resolve();
+      });
+      child.once('error', () => {
+        clearTimeout(t);
+        reject(guard.firstError() ?? new Error(`${spec.id} 启动失败`));
+      });
+    });
+  } catch (err) {
+    child.kill('SIGKILL');
+    throw err;
+  }
 
   let stderr = '';
   child.stderr?.on('data', (d: Buffer) => {

@@ -7,7 +7,7 @@
  *  - 用户可用 ~/.agentbd/engines.json 覆盖/追加（对应 acpx 的 config.json 思路）。
  */
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
@@ -68,6 +68,53 @@ const CLAUDE_ADAPTER = resolveAdapter('claude-agent-acp', '@agentclientprotocol/
 const CODEX_ADAPTER = resolveAdapter('codex-acp', '@agentclientprotocol/codex-acp', '1.13.0');
 
 /** P0 的 5 个引擎：全部在本机实测握手成功（2026-09-23） */
+/**
+ * 定位 agnesd 二进制。**不能硬编码 /Applications/AgnesCode.app**：
+ * 应用可能被移动过位置，或处于 AppTranslocation（未正式安装，从 ~/Downloads
+ * 或挂载卷直接运行时 macOS 会把包挪进 /private/var/folders/…/T/AppTranslocation/
+ * <uuid>/d/，此时 /Applications 下的路径直接不存在——doctor 报 ENOENT）。
+ * 按「已知候选 → mdfind → AppTranslocation glob」顺序找，取第一个存在的。
+ */
+function resolveAgnesd(): string {
+  const rel = 'Contents/Resources/bin/agnesd';
+  const candidates = [
+    '/Applications/AgnesCode.app/' + rel,
+    path.join(os.homedir(), 'Applications/AgnesCode.app', rel),
+  ];
+  for (const c of candidates) if (existsSync(c)) return c;
+
+  // AppTranslocation 兜底：从当前运行的 AgnesCode 进程反推，比 Spotlight 可靠
+  // （AppTranslocation 里的包**没被 Spotlight 索引**，mdfind 必然查不到）。
+  try {
+    const ps = spawnSync('ps', ['-Ao', 'command'], { encoding: 'utf8', timeout: 3000 }).stdout ?? '';
+    const m = ps.match(/\S*AppTranslocation\/\S*\/d\/AgnesCode\.app\//);
+    if (m) {
+      const p = m[0] + rel;
+      if (existsSync(p)) return p;
+    }
+  } catch { /* ps 不可用 → 继续扫盘 */ }
+
+  // 扫 /private/var/folders/<xx>/<user>/T/AppTranslocation/*/d/
+  try {
+    for (const base of readdirSync('/private/var/folders', { withFileTypes: true })) {
+      if (!base.isDirectory()) continue;
+      const perUser = path.join('/private/var/folders', base.name);
+      for (const u of readdirSync(perUser, { withFileTypes: true })) {
+        if (!u.isDirectory()) continue;
+        const trans = path.join(perUser, u.name, 'T', 'AppTranslocation');
+        if (!existsSync(trans)) continue;
+        for (const app of readdirSync(trans, { withFileTypes: true })) {
+          if (!app.isDirectory()) continue;
+          const p = path.join(trans, app.name, 'd', 'AgnesCode.app', rel);
+          if (existsSync(p)) return p;
+        }
+      }
+    }
+  } catch { /* 无权限/结构变化 → 返回候选路径，由 spawn 报 ENOENT */ }
+
+  return candidates[0]!;
+}
+
 export const BUILTIN_ENGINES: EngineSpec[] = [
   {
     id: 'claude',
@@ -124,7 +171,7 @@ export const BUILTIN_ENGINES: EngineSpec[] = [
     id: 'agnes',
     label: 'Agnes Code (agnesd)',
     vendor: 'Agnes',
-    command: '/Applications/AgnesCode.app/Contents/Resources/bin/agnesd',
+    command: resolveAgnesd(),
     args: ['agent'],
     channel: 'acp-service',
     service: {
@@ -136,6 +183,16 @@ export const BUILTIN_ENGINES: EngineSpec[] = [
     authHint: 'provider/model 与 GUI 同源（~/.agnes/config/config.yaml 的 active_provider）；真实回合需要该 provider 的密钥',
     env: () => ({ ...agnesDefaults(), ...agnesSecretEnv() }),
     note: 'agnesd = goose-server 1.62.6 fork：本地 HTTPS + wss://…/acp?token=（非 stdio，实测 2026-09-23）',
+  },
+  {
+    id: 'opencode',
+    label: 'OpenCode',
+    vendor: 'SST',
+    command: 'opencode',
+    args: ['acp'],
+    channel: 'acp',
+    authHint: '复用 ~/.local/share/opencode 的 provider 凭证（opencode auth list）',
+    note: '原生 ACP（`opencode acp`，v2.0.16 实测）；多 provider 聚合',
   },
 ];
 

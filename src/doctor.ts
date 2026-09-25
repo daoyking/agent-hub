@@ -18,9 +18,30 @@ export type ProbeResult = {
   error?: string;
 };
 
+/** 把 spawn 失败翻译成人能看懂的话（ENOENT 常见于应用被卸载/移动） */
+function describeLaunchFailure(msg: string): string {
+  if (/ENOENT/.test(msg)) {
+    return (
+      '可执行文件不存在（ENOENT）。应用可能被卸载或移动到别处了。\n' +
+      '  · 检查引擎的 command 路径是否仍存在（`ls -l <command>`）\n' +
+      '  · 桌面应用类引擎在 /Applications 下；移动后用 ~/.agentbd/engines.json 覆盖 command'
+    );
+  }
+  if (/EACCES|EPERM/.test(msg)) return `无执行权限（${msg}）：chmod +x <command>`;
+  return msg;
+}
+
 export async function probe(spec: EngineSpec, cwd = process.cwd(), timeoutMs = 25000): Promise<ProbeResult> {
   const t0 = Date.now();
-  const agent = await launch(spec, { cwd });
+  // launch 自身可能抛（ENOENT：二进制不在了，比如应用被卸载/移动；EACCES 等）。
+  // 单个引擎探不通**不能**让整份 doctor 崩掉——那会让其他引擎的健康状况一起看不见。
+  let agent;
+  try {
+    agent = await launch(spec, { cwd });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { engine: spec.id, ok: false, ms: Date.now() - t0, error: describeLaunchFailure(msg) };
+  }
   try {
     const profile = await Promise.race([
       (async () =>

@@ -42,6 +42,8 @@ export type ServerState = {
     id: string;
     ports: number[];
     managed: string;
+    /** 是否登记在 ~/.agentbd/services.json（false = 现场发现但未纳管） */
+    declared?: boolean;
     lamp: string;
     detail: string;
     mcp?: string;
@@ -132,12 +134,22 @@ async function gatherState(): Promise<ServerState> {
   );
   const manifest = await loadManifest();
   const declared = new Set(manifest.services.map((x) => x.id));
+  // 曾经这里按 `declared.has(id) || (managed !== 'unmanaged' && ports.length)` 过滤，
+  // 结果是：**没登记进 services.json 的服务在面板上完全看不见**——本机明明在跑的
+  // 进程一律静默消失，用户只能对着 lsof/系统设置自己数（"lsh 管本地服务，
+  // agentbd 里怎么少了一堆"）。现在全量显示，用 declared 字段区分"已登记/未登记"，
+  // 让遗漏变成**可见**而不是看不见；灯只对有意义的（登记过 / 有端口 / 非系统进程）判定。
   const services = probed
-    .filter((s) => declared.has(s.id) || (s.managed !== 'unmanaged' && s.ports.length > 0))
+    .filter((s) => {
+      if (s.ports.length > 0) return true; // 监听端口的一律算服务
+      if (declared.has(s.id)) return true; // 登记过但当前无端口（守护/按需）
+      return false;
+    })
     .map((s) => ({
       id: s.id,
       ports: s.ports,
       managed: String(s.managed),
+      declared: declared.has(s.id),
       lamp: s.health?.lamp ?? 'unknown',
       detail: s.health?.detail ?? '',
       mcp: s.mcp?.url,
