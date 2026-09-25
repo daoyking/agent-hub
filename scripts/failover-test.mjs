@@ -1,5 +1,5 @@
 /**
- * 降级/重试逻辑单测：node --import tsx scripts/failover-test.mjs
+ * 降级/重试逻辑单测：node --import tsx scripts/failover-test.mjs（41 项）
  *
  * 锁住 5eda350 引入的分类与决策逻辑（src/bus.ts 顶部导出的纯函数）。重点是
  * **软失败**那条：agnesd 把上游错误写进正文再正常 end_turn，不特判就会把

@@ -334,7 +334,7 @@ $ agentbd serve uninstall  # 一键还原
 
 | 命令 | 覆盖 | 需要真实引擎 |
 |---|---|---|
-| `npm test` | `tsc --noEmit` + `failover-test`（降级/重试纯逻辑 42 项） | ❌ 可进 CI |
+| `npm test` | `tsc --noEmit` + `failover-test`（降级/重试纯逻辑 41 项） | ❌ 可进 CI |
 | `npm run failover-test` | 软失败检测、失败分类、退避档位、模型降级链、耗尽提示 | ❌ |
 | `npm run ui-verify` | 面板 DOM 断言 17 项（真实 ui.html + jsdom + 真实 SSE） | ⚠️ 需先起 `serve` |
 | `npm run lamp-test` | 托盘灯色判定 8 项（Swift 联合编译） | ❌ |
