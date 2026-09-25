@@ -96,8 +96,14 @@ export function friendlyName(exe: string, cmdline?: string): string {
   if (shim?.[1]) return shim[1];
   // ① .app → 应用名。注意 .app 名**可以含空格**（"TRAE SOLO CN.app"），
   //    所以匹配到路径分隔符/引号/空白为止，不能用 \S+。
+  //    排除**框架/运行时自带的伪 .app**——它们不是服务，是解释器的马甲：
+  //      Python.app（CPython.framework 内）、Electron/Chromium/…/Helper.app
   const app = line.match(/([^\/\\"']+?)\.app(?=\/|[\s"']|$)/);
-  if (app?.[1]?.trim()) return app[1].trim();
+  if (app?.[1]?.trim()) {
+    const n = app[1].trim();
+    const RUNTIME = /^Python(\.framework)?$|^Electron(\.framework)?$|^Chromium$|^Node$|^OpenSSL$|^Perl$|^Ruby$/i;
+    if (!RUNTIME.test(n)) return n;
+  }
   // ② node_modules 包名（取 scope 后一段）
   const pkg = line.match(/node_modules\/(?:@[^/]+\/)?([^/\s]+)/);
   if (pkg?.[1]) return pkg[1];
@@ -117,23 +123,33 @@ export function friendlyName(exe: string, cmdline?: string): string {
     if (!/^(index|main|cli|app|run|start|__main__|mod)(\.[a-z]+)?$/.test(file)) {
       return file.replace(/\.[^.]+$/, '');
     }
-    // 通用文件名 → 从 cmdline 里找回**完整的**那个 token 再上溯目录。
+    // 通用文件名（index/main/cli…）→ 从 cmdline 里找回**完整的**那个 token 再上溯目录。
     // （上面的正则只捕获了 basename，目录信息在这里是拿不到的。）
     const full = line.split(/\s+/).find((t) => t.endsWith(file)) ?? file;
-    const dir = full.split('/');
-    // 上溯找第一个"有信息量"的目录名：跳过 src/lib/dist/build/bin 等结构目录。
-    // 但**不能越过家目录边界**——/Users/j/x/src/index.js 里的 "x" 跟服务身份无关，
-    // 报 "x" 比老实报 "node（解释器）" 更误导。判断方式：候选段是否位于
-    // /Users/<name> 或 /home/<name> 之下。
-    const SKIP = new Set(['.', '..', 'src', 'lib', 'dist', 'build', 'bin', 'out', 'packages', 'node_modules']);
-    const homeIdx = dir.findIndex((d) => d.toLowerCase() === 'users' || d.toLowerCase() === 'home');
-    // home/<name>/ 之下才算项目空间；再往上的首层（~/x）仍是用户目录，没信息量
-    const minIdx = homeIdx >= 0 ? homeIdx + 3 : 0;
-    for (let i = dir.length - 2; i >= minIdx; i--) {
-      const seg = dir[i]!;
-      if (!seg || SKIP.has(seg.toLowerCase())) continue;
-      return seg;
+    if (full.includes('/')) {
+      const dir = full.split('/');
+      // 上溯找第一个"有信息量"的目录名：跳过 src/lib/dist/build/bin 等结构目录。
+      // 但**不能越过家目录边界**——/Users/j/x/src/index.js 里的 "x" 跟服务身份无关，
+      // 报 "x" 比老实报 "node（解释器）" 更误导：候选段必须位于 /Users/<name> 或
+      // /home/<name> 之下才认。
+      const SKIP = new Set(['.', '..', 'src', 'lib', 'dist', 'build', 'bin', 'out', 'packages', 'node_modules']);
+      const homeIdx = dir.findIndex((d) => d.toLowerCase() === 'users' || d.toLowerCase() === 'home');
+      // home/<name>/ 之下才算项目空间；再往上的首层（~/x）仍是用户目录，没信息量
+      const minIdx = homeIdx >= 0 ? homeIdx + 3 : 0;
+      for (let i = dir.length - 2; i >= minIdx; i--) {
+        const seg = dir[i]!;
+        if (!seg || SKIP.has(seg.toLowerCase())) continue;
+        return seg;
+      }
+    } else if (file !== full) {
+      // 多级相对路径：packages/server/src/index.ts → 取第一级
+      return file.replace(/\.[^.]+$/, '');
     }
+    // 单级相对路径（src/cli.ts）：目录全是 SKIP 里的结构目录，没法上溯。
+    // 这种��况宁可报文件名（cli）也不要回退成 "node"——后者信息量为零。
+    // 注意只对**相对路径**这么宽松：/Users/j/x/src/index.js 上溯失败是另一回事，
+    // 那里报 "index" 仍不如老实说"没名字"。
+    if (!full.startsWith('/')) return file.replace(/\.[^.]+$/, '');
   }
   // ④b 解释器之后的**可执行脚本**（`.../bin/python /x/chroma`）。
   //     要在**整个 cmdline 里**找第二个及以后的绝对路径（第一个是解释器本身），

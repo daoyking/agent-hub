@@ -103,6 +103,8 @@ const names = [
   ['裸 python 如实标注', 'python3', 'python3', 'python3（解释器）'],
   ['通用脚本名上溯父目录', 'node', 'node -r ts-node/register packages/server/src/index.ts', 'server'],
   ['上层目录是 src 则继续上溯', 'node', 'node /x/pkg/src/index.js', 'pkg'],
+  ['单级相对路径回退到文件名', 'node', 'node --import tsx src/cli.ts serve', 'cli'],
+  ['Python.app 是框架不是服务', 'Python', '/opt/Cellar/python@3.14/Python.framework/Resources/Python.app/Contents/MacOS/Python /x/s.py', 's'],
   ['家目录首层不算服务名', 'node', 'node /Users/j/x/src/index.js', 'node'],
   ['家目录下的项目目录可用', 'node', 'node /Users/j/code/thing/src/index.js', 'thing'],
   ['非解释器原样', 'ollama', '/usr/local/bin/ollama serve', 'ollama'],
