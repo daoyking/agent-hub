@@ -71,6 +71,117 @@ export type Discovery = {
   listeners: Array<{ pid: number; name: string; ports: number[]; cmdline: string }>;
 };
 
+/**
+ * 从完整 cmdline 猜一个人类可读的服务名。
+ *
+ * 为什么不直接显示 `pid-12345` 或 lsof 的 `c` 字段：lsof 的进程名只有
+ * `python` / `node` / `java` 这种**解释器名**，毫无信息量（本机一半服务都是
+ * python/node）；pid 更糟——重启就变，无法当稳定标识。所以这里从 cmdline 里
+ * 抠出真正的应用名。
+ *
+ * 优先级（先具体后笼统）：
+ *   1. launchd label（已在 discover 里覆盖，天然最准）
+ *   2. .app 路径 → 应用名（/Applications/Ollama.app/… → Ollama）
+ *   3. 脚本/入口文件名去扩展名（.../chroma → chroma）
+ *   4. npm 包名（node_modules/@scope/pkg → pkg）
+ *   5. 解释器名兜底（python / node），并显式标注"（解释器）"提示别当服务名
+ */
+export function friendlyName(exe: string, cmdline?: string): string {
+  const line = cmdline ?? '';
+  // ⓪ 包管理器 shim 要**最先**判：node_modules/.bin/<name> 里的 `<name>`
+  //    才是服务名；先撞 node_modules 分支会拿到目录名 ".bin"（毫无意义）。
+  const npx = line.match(/node_modules\/\.bin\/([^\/\s]+)/);
+  if (npx?.[1]) return npx[1];
+  const shim = line.match(/\/(?:\.local\/bin|\.bun\/bin|volta\/bin)\/([^\/\s]+)/);
+  if (shim?.[1]) return shim[1];
+  // ① .app → 应用名。注意 .app 名**可以含空格**（"TRAE SOLO CN.app"），
+  //    所以匹配到路径分隔符/引号/空白为止，不能用 \S+。
+  const app = line.match(/([^\/\\"']+?)\.app(?=\/|[\s"']|$)/);
+  if (app?.[1]?.trim()) return app[1].trim();
+  // ② node_modules 包名（取 scope 后一段）
+  const pkg = line.match(/node_modules\/(?:@[^/]+\/)?([^/\s]+)/);
+  if (pkg?.[1]) return pkg[1];
+  // ③ python -m module / uvicorn app:app
+  const mod = line.match(/(?:^|\s)-m\s+([\w.]+)/) ?? line.match(/(?:^|\s)([\w-]+):[\w-]+\s*$/);
+  if (mod?.[1]) return mod[1];
+  // ④ 入口脚本名：带扩展名的绝对/相对路径。文件名是 index/main/cli 这类通用名时
+  //     **上溯到父目录**取名（`packages/server/src/index.ts` → "server"），
+  //     比回退到 "node（解释器）" 有信息量得多。
+  const script =
+    line.match(/(?:^|\s|\/)([^\/\s:]+\.(?:js|mjs|cjs|ts|py|sh))(?=\s|$)/) ??
+    line.match(/(?:^|\s)((?:[^\/\s:]+\/)+[^\/\s:]+\.(?:js|mjs|cjs|ts|py|sh))(?=\s|$)/);
+  let sawScriptFile = false;
+  if (script?.[1]) {
+    sawScriptFile = true;
+    const file = script[1];
+    if (!/^(index|main|cli|app|run|start|__main__|mod)(\.[a-z]+)?$/.test(file)) {
+      return file.replace(/\.[^.]+$/, '');
+    }
+    // 通用文件名 → 从 cmdline 里找回**完整的**那个 token 再上溯目录。
+    // （上面的正则只捕获了 basename，目录信息在这里是拿不到的。）
+    const full = line.split(/\s+/).find((t) => t.endsWith(file)) ?? file;
+    const dir = full.split('/');
+    // 上溯找第一个"有信息量"的目录名：跳过 src/lib/dist/build/bin 等结构目录。
+    // 但**不能越过家目录边界**——/Users/j/x/src/index.js 里的 "x" 跟服务身份无关，
+    // 报 "x" 比老实报 "node（解释器）" 更误导。判断方式：候选段是否位于
+    // /Users/<name> 或 /home/<name> 之下。
+    const SKIP = new Set(['.', '..', 'src', 'lib', 'dist', 'build', 'bin', 'out', 'packages', 'node_modules']);
+    const homeIdx = dir.findIndex((d) => d.toLowerCase() === 'users' || d.toLowerCase() === 'home');
+    // home/<name>/ 之下才算项目空间；再往上的首层（~/x）仍是用户目录，没信息量
+    const minIdx = homeIdx >= 0 ? homeIdx + 3 : 0;
+    for (let i = dir.length - 2; i >= minIdx; i--) {
+      const seg = dir[i]!;
+      if (!seg || SKIP.has(seg.toLowerCase())) continue;
+      return seg;
+    }
+  }
+  // ④b 解释器之后的**可执行脚本**（`.../bin/python /x/chroma`）。
+  //     要在**整个 cmdline 里**找第二个及以后的绝对路径（第一个是解释器本身），
+  //     且末尾不能是 bin/xxx（那还是解释器，不是被解释的脚本）。
+  //     注意：④ 已经处理过的入口脚本不要再捡一次（否则 /x/src/index.js 会被
+  //     当成"可执行脚本"报成 index.js，绕过了④里的目录上溯判断）。
+  const parts = line.split(/\s+/);
+  for (let i = 1; i < parts.length; i++) {
+    const p = parts[i]!;
+    if (!p.startsWith('/') || p.includes('=')) continue;
+    if (sawScriptFile && p.endsWith(script![1]!)) continue;
+    if (/(?:^|\/)(?:bin|sbin)\/[^/]+$/.test(p)) continue;
+    return p.split('/').pop() || p;
+  }
+
+  // ⑤ 解释器兜底：裸 python/node/java 无法推断真实服务，如实标注而不是假装有名字。
+  //    注意只有**整个 cmdline 就是解释器**（没带脚本）才算解释器；
+  //    "node /x/whatever.js" 的服务名是 whatever.js，不是 node。
+  const base = (exe.split('/').pop() ?? exe).trim();
+  const INTERPRETER = /^(python[\d.]*|node|java|perl|ruby|php|dotnet|mono)$/i;
+  if (INTERPRETER.test(base) && !/\.(?:js|mjs|cjs|ts|py|sh)(?=\s|$)/.test(line)) {
+    return `${base}（解释器）`;
+  }
+  return base || 'unknown';
+}
+
+/**
+ * lsof 的 `-F` 输出把非 ASCII 字节转义成 `\xNN`（中文/emoji 应用名会变成
+ * 一串 `M-fM-5M-.M-eM-<M^U` 这样的乱码，ps 也有同样问题）。这里还原成 UTF-8。
+ */
+function unescapeLsof(s: string): string {
+  if (!s.includes('\\x')) return s;
+  const bytes: number[] = [];
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === '\\' && s[i + 1] === 'x') {
+      const hex = s.slice(i + 2, i + 4);
+      if (/^[0-9a-fA-F]{2}$/.test(hex)) {
+        bytes.push(parseInt(hex, 16));
+        i += 3;
+        continue;
+      }
+    }
+    // 非转义段按 UTF-8 字节并入
+    for (const b of Buffer.from(s[i]!, 'utf8')) bytes.push(b);
+  }
+  return Buffer.from(bytes).toString('utf8');
+}
+
 async function lsofListeners(): Promise<Discovery['listeners']> {
   let out = '';
   try {
@@ -87,7 +198,7 @@ async function lsofListeners(): Promise<Discovery['listeners']> {
     const tag = line[0]!;
     const val = line.slice(1);
     if (tag === 'p') pid = Number(val);
-    else if (tag === 'c') name = val;
+    else if (tag === 'c') name = unescapeLsof(val);
     else if (tag === 'n') {
       const m = /:(\d+)$/.exec(val);
       if (m && pid) {
@@ -107,8 +218,12 @@ async function lsofListeners(): Promise<Discovery['listeners']> {
 /** 完整命令行 —— 技能 §3.0：进度特征要照完整命令行写，不能只用进程名 */
 export async function cmdlineOf(pid: number): Promise<string> {
   try {
-    const { stdout } = await exec('ps', ['-ww', '-o', 'command=', '-p', String(pid)]);
-    return stdout.trim();
+    // LC_ALL/LANG 必须是 UTF-8：ps 在非 UTF-8 locale（如 LANG=zh_CN.GBK）
+    // 下会把非 ASCII 字节转义成 \xNN，中文应用名就成了 M-fM-5M-.M-eM-<M^U。
+    const { stdout } = await exec('ps', ['-ww', '-o', 'command=', '-p', String(pid)], {
+      env: { ...process.env, LC_ALL: 'en_US.UTF-8', LANG: 'en_US.UTF-8' },
+    });
+    return unescapeLsof(stdout.trim());
   } catch {
     return '';
   }
@@ -359,11 +474,14 @@ export async function discover(): Promise<LocalService[]> {
   }
 
   // ② 其余监听进程 → unmanaged（技能 §5：未托管服务会反复死）
+  //    id 用 pid 保持唯一（进程重启后会变，manifest 才能重新认领），
+  //    但 label 给人类可读的名字——面板显示 label，不显示 pid-xxxx。
   for (const l of ls) {
     if (claimed.has(l.pid)) continue;
+    const name = friendlyName(l.name, l.cmdline);
     services.set(`pid-${l.pid}`, {
       id: `pid-${l.pid}`,
-      label: `${l.name} (pid ${l.pid})`,
+      label: name,
       managed: 'unmanaged',
       pid: l.pid,
       ports: l.ports,

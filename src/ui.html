@@ -110,9 +110,9 @@ async function refresh() {
     $('services').innerHTML = (() => {
       const rows = s.services.map((x) =>
         `<div class="row" title="${esc(x.detail)}${x.declared ? '' : '\n未登记进 services.json（agentbd services init 可纳管）'}">` +
-        `${lamp(x.lamp)}${esc(x.id)}` +
+        `${lamp(x.lamp)}${esc(x.label || x.id)}` +
         `${x.declared ? '' : '<em class="undecl" title="未纳管">未登记</em>'}` +
-        `<small>${x.ports.map(p=>':'+p).join(' ')}</small></div>`).join('');
+        `<small>${esc(x.id.startsWith('pid-') ? '' : x.id)}${x.ports.map(p=>':'+p).join(' ')}</small></div>`).join('');
       const n = s.services.length, d = s.services.filter((x) => x.declared).length;
       return (rows || '<div class="row">(无)</div>') +
         `<div class="row total"><small>共 ${n} 个 · 已登记 ${d} · 现场发现 ${n - d}</small></div>`;

@@ -40,6 +40,8 @@ export type ServerState = {
   engines: Array<{ id: string; label: string; vendor: string; channel: string }>;
   services: Array<{
     id: string;
+    /** 人类可读名（面板显示这个，不显示 pid-xxxx） */
+    label?: string;
     ports: number[];
     managed: string;
     /** 是否登记在 ~/.agentbd/services.json（false = 现场发现但未纳管） */
@@ -147,6 +149,7 @@ async function gatherState(): Promise<ServerState> {
     })
     .map((s) => ({
       id: s.id,
+      label: s.label,
       ports: s.ports,
       managed: String(s.managed),
       declared: declared.has(s.id),

@@ -88,5 +88,32 @@ check('给出调参出路', msg.includes('AGENTBD_RATE_RETRIES'), true);
 check('附原始错误首行', msg.includes('Rate limit exceeded'), true);
 check('不泄露原始错误后续行', msg.includes('second line'), false);
 
+// —— 服务名推断（2026-09-25：面板曾满屏 pid-xxxx / 解释器名 / 乱码）——
+const { friendlyName } = await import('../src/services.ts');
+const names = [
+  ['.app 应用名', 'node', '/Applications/Ollama.app/Contents/Resources/ollama serve', 'Ollama'],
+  ['.app 名含空格', 'node', '/Applications/TRAE SOLO CN.app/Contents/MacOS/x', 'TRAE SOLO CN'],
+  ['node_modules 包名', 'node', '/x/node_modules/@agentclientprotocol/sdk/dist/cli.js', 'sdk'],
+  ['node_modules/.bin 优先于包名', 'node', '/x/node_modules/.bin/vite --port 5173', 'vite'],
+  ['~/.local/bin shim', 'node', '/Users/j/.local/bin/claude --acp', 'claude'],
+  ['python -m 模块', 'python3', '/opt/py/bin/python3 -m hermes_gateway serve', 'hermes_gateway'],
+  ['无扩展名的脚本路径', 'python3', '/Users/j/.hermes/venv/bin/python /x/chroma', 'chroma'],
+  ['node 跑带扩展名脚本', 'node', 'node /x/whatever.js', 'whatever'],
+  ['裸解释器如实标注', 'node', 'node', 'node（解释器）'],
+  ['裸 python 如实标注', 'python3', 'python3', 'python3（解释器）'],
+  ['通用脚本名上溯父目录', 'node', 'node -r ts-node/register packages/server/src/index.ts', 'server'],
+  ['上层目录是 src 则继续上溯', 'node', 'node /x/pkg/src/index.js', 'pkg'],
+  ['家目录首层不算服务名', 'node', 'node /Users/j/x/src/index.js', 'node'],
+  ['家目录下的项目目录可用', 'node', 'node /Users/j/code/thing/src/index.js', 'thing'],
+  ['非解释器原样', 'ollama', '/usr/local/bin/ollama serve', 'ollama'],
+  ['空 cmdline 兜底', 'ollama', '', 'ollama'],
+];
+console.log('\n=== 服务名推断 ===');
+for (const [name, exe, cmd, want] of names) {
+  check(name, friendlyName(exe, cmd), want);
+}
+// lsof 的 \xNN 转义还原（中文应用名曾是 M-fM-5M-.M-eM-<M^U）
+check('中文名从 \\xNN 还原', friendlyName('node', '/Applications/浮引.app/x'), '浮引');
+
 console.log(failed === 0 ? '\n全部通过' : `\n${failed} 项失败`);
 process.exit(failed === 0 ? 0 : 1);

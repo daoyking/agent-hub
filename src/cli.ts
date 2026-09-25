@@ -532,9 +532,13 @@ async function cmdServices(flags: Flags): Promise<void> {
   // list / probe
   const only = sub === 'probe' ? flags._[1] : undefined;
   const declared = new Set((await loadManifest()).services.map((x) => x.id));
-  const targets = (only ? list.filter((s) => s.id === only || s.ports.includes(Number(only))) : list).filter(
-    (s) => flags.all || declared.has(s.id) || (s.managed !== 'unmanaged' && s.ports.length > 0),
-  );
+  // 与面板一致：**默认全量列出**。曾经按
+  // `declared.has(id) || (managed !== 'unmanaged' && ports.length)` 过滤，
+  // 未纳管的服务直接从列表里消失（本机实测 39 个只显示 9 个），
+  // 用户只能自己数不出漏了谁。--all 保留为显式开关（未来若要默认收敛）。
+  const targets = (
+    only ? list.filter((s) => s.id === only || s.ports.includes(Number(only))) : list
+  ).filter((s) => flags.all || s.ports.length > 0 || declared.has(s.id));
   if (targets.length === 0) {
     console.log('(没有发现服务；先跑 `agentbd services init`)');
     return;
@@ -564,7 +568,10 @@ async function cmdServices(flags: Flags): Promise<void> {
   for (const [s, h] of results) {
     const port = s.ports.length ? s.ports.map((p) => `:${p}`).join(',') : '-';
     const mcpTag = s.mcp?.url ? ' [mcp]' : '';
-    console.log(`${LAMP_ICON[h.lamp]} ${s.id.padEnd(34)} ${port.padEnd(14)} ${String(s.managed).padEnd(11)}${mcpTag}`);
+    // 显示 label（人类可读名），不是 pid-xxxxx；未纳管的额外打标
+    const name = s.label || s.id;
+    const tag = declared.has(s.id) ? '' : ' [未登记]';
+    console.log(`${LAMP_ICON[h.lamp]} ${(name + tag).padEnd(40)} ${port.padEnd(14)} ${String(s.managed).padEnd(11)}${mcpTag}`);
     console.log(`     ${h.detail}`);
   }
   const agg = aggregateLamp(results.map(([, h]) => h));
