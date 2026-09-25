@@ -531,20 +531,29 @@ export async function discover(): Promise<LocalService[]> {
   return [...services.values()].sort((a, b) => (a.ports[0] ?? 99999) - (b.ports[0] ?? 99999));
 }
 
-/** 从现场发现生成一份可校准的清单骨架（技能 §3.7b：声明的动作必须实测过） */
-const INTERESTING = /(ollama|litellm|browseros|codebuddy|hermes|openclaw|anythingllm|mcp|gateway|qoder|agnes|goose)/i;
+/**
+ * `services init` 要写进清单的筛选。
+ *
+ * 曾经这里是**白名单**（INTERESTING = ollama|litellm|hermes|… 的硬编码正则），
+ * 白名单外的服务被静默丢弃——和面板/CLI 当初的过滤 bug 是同一个病：
+ * 「用户看不见 ⇒ 等于不存在」。本机实测 39 个只写进 8 个。
+ *
+ * 现在反过来：**默认全量写入**，只排除明确的系统噪音（rapportd / ControlCenter
+ * 这类开机自启、跟开发无关的）。这样清单 = 「我本机在跑什么」的如实快照，
+ * 而不是「我恰好记得住的几个」。
+ */
+const SYSTEM_NOISE =
+  /^(rapportd|ControlCe|ControlCenter|logioptio|logioptionsplus_agent|WeChat|mDNSResponder|distnoted|cfprefsd|sharingd|WiFiAgent|secd|handoffd|airportd|powerd|diskarbitrationd|trustd|securityd|opendirectoryd|notifyd|coredeletiond|lsd|backupd|cloudphotod|photolibraryd|mediaanalysisd|corespotlightd|knowledge-agent|Spotlight|NotificationCenter|Dock|Finder|SystemUIServer)$/i;
 
 export async function initManifest(): Promise<string> {
   const list = await discover();
   const existing = await loadManifest(); // 重新 init 不能冲掉手工校准/种子条目
   const services: LocalService[] = list
-    .filter((s) => s.ports.length > 0)
-    .filter(
-      (s) =>
-        s.managed !== 'unmanaged' ||
-        s.ports.some((p) => !!L2_HINTS[p]) ||
-        INTERESTING.test(`${s.label} ${s.cmdline ?? ''}`),
-    )
+    // 无端口的**托管**服务也写进来（launchd 守护型：dsh-web / alt-tab-macos 这类
+    // 它们靠进程存活而非端口对外服务）。只过滤 unmanaged 且无端口的——那种
+    // 基本是刚启动就退出的残留，记进去只会污染清单。
+    .filter((s) => s.ports.length > 0 || s.managed !== 'unmanaged')
+    .filter((s) => !SYSTEM_NOISE.test(s.label) || s.ports.some((p) => !!L2_HINTS[p]))
     .map((s) => {
       const port = s.ports[0]!;
       const head = s.cmdline?.split(' ').slice(0, 2).join(' ') ?? '';
