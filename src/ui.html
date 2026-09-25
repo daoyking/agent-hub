@@ -17,12 +17,26 @@
   .row { padding:6px 8px; border-radius:6px; display:flex; align-items:center; gap:4px; }
   .row:hover { background:var(--panel); }
   .row small { color:var(--dim); margin-left:auto; font-size:11px; }
-  .row.total { opacity:.65; border-top:1px solid var(--line); margin-top:4px; padding-top:6px; }
-  em.undecl { font-style:normal; font-size:10px; color:#d29922; border:1px solid #3a3020; border-radius:4px; padding:0 4px; margin-right:6px; }
-  .row.total { opacity:.65; border-top:1px solid var(--line); margin-top:4px; padding-top:6px; }
   em.undecl { font-style:normal; font-size:10px; color:#d29922; border:1px solid #3a3020; border-radius:4px; padding:0 4px; margin-right:6px; }
   .mcp-target { color:var(--dim); font-size:11px; word-break:break-all; }
-  #ask { display:flex; gap:8px; }
+
+  /* ── 左栏：筛选 + 可折叠分组（服务变多后 44 条平铺太长）── */
+  #filters { display:flex; gap:6px; margin-bottom:10px; position:sticky; top:-16px; background:var(--bg); padding:16px 0 8px; z-index:5; }
+  #q { flex:1; min-width:0; padding:5px 8px; font-size:12.5px; }
+  #onlyUndecl { flex:none; font-size:11px; color:var(--dim); display:flex; align-items:center; gap:3px; white-space:nowrap; cursor:pointer; user-select:none; }
+  section.grp { margin-top:10px; }
+  section.grp > summary {
+    cursor:pointer; list-style:none; user-select:none;
+    font-size:12px; color:var(--dim); text-transform:uppercase; letter-spacing:.08em;
+    display:flex; align-items:center; gap:5px; padding:4px 0;
+  }
+  section.grp > summary::-webkit-details-marker { display:none; }
+  section.grp > summary::before { content:'▸'; font-size:10px; transition:transform .12s; }
+  section.grp[open] > summary::before { transform:rotate(90deg); }
+  section.grp > summary .cnt { margin-left:auto; text-transform:none; letter-spacing:0; font-size:11px; }
+  .grp-body { padding-left:2px; }
+  .row.total { opacity:.6; border-top:1px solid var(--line); margin-top:4px; padding-top:6px; }
+  .row mark { background:#3a2f10; color:#f0d78c; border-radius:3px; padding:0 1px; }
   /* ② 顶栏：状态 + 引擎选择；对话区居中伸展，输入框常驻底部 */
   #topbar { display:flex; flex-direction:column; gap:8px; }
   .topbar-row { display:flex; align-items:center; gap:8px; }
@@ -61,15 +75,15 @@
 <body>
 <aside>
   <h1>agentbd 面板</h1>
-  <div id="status">连接中…</div>
-  <h2>引擎</h2>
-  <div id="engines"></div>
-  <h2>本地服务</h2>
-  <div id="services"></div>
-  <h2>MCP Hub</h2>
-  <div id="mcp"></div>
-  <h2>用量</h2>
-  <div id="stats"></div>
+  <div id="filters">
+    <input id="q" type="search" placeholder="筛选引擎 / 服务 / MCP…" autocomplete="off">
+    <label id="onlyUndecl" title="只看未登记进 services.json 的服务"><input type="checkbox">未登记</label>
+  </div>
+  <section class="grp" id="g-engines" open><summary>引擎 <span class="cnt" id="c-engines"></span></summary><div class="grp-body" id="engines"></div></section>
+  <section class="grp" id="g-svc-ok" open><summary>本地服务 · 已登记 <span class="cnt" id="c-svc-ok"></span></summary><div class="grp-body" id="services-ok"></div></section>
+  <section class="grp" id="g-svc-new"><summary>本地服务 · 现场发现 <span class="cnt" id="c-svc-new"></span></summary><div class="grp-body" id="services-new"></div></section>
+  <section class="grp" id="g-mcp" open><summary>MCP Hub <span class="cnt" id="c-mcp"></span></summary><div class="grp-body" id="mcp"></div></section>
+  <section class="grp" id="g-stats" open><summary>用量 <span class="cnt" id="c-stats"></span></summary><div class="grp-body" id="stats"></div></section>
 </aside>
 <main>
   <div id="topbar">
@@ -96,54 +110,102 @@
 const $ = (id) => document.getElementById(id);
 const lamp = (c) => `<span class="lamp ${c||'unknown'}"></span>`;
 const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+/** 关键词高亮（在已 escape 的文本上做，<mark> 是我们自己加的） */
+function hl(s, q) {
+  const t = esc(s);
+  if (!q) return t;
+  const i = t.toLowerCase().indexOf(q.toLowerCase());
+  if (i < 0) return t;
+  return t.slice(0, i) + '<mark>' + t.slice(i, i + q.length) + '</mark>' + t.slice(i + q.length);
+}
+const filters = () => ({
+  q: $('q').value.trim().toLowerCase(),
+  onlyUndecl: $('onlyUndecl').querySelector('input').checked,
+});
+const hit = (text, f) => !f.q || String(text).toLowerCase().includes(f.q);
+const setCount = (id, n, shown) => {
+  const el = $(id);
+  el.textContent = (shown != null && shown !== n) ? `${shown}/${n}` : String(n);
+};
 function log(cls, text) {
   const div = document.createElement('div');
   div.className = cls; div.textContent = text;
   $('events').appendChild(div); $('events').scrollTop = $('events').scrollHeight;
 }
+let lastState = null; // 筛选变化时本地重渲染，不必重新 fetch
+let lastStats = null;
 async function refresh() {
   try {
     const s = await (await fetch('/api/state')).json();
+    lastState = s;
     $('status').textContent = `更新于 ${new Date(s.at).toLocaleTimeString()}`;
-    $('engines').innerHTML = s.engines.map((e) =>
-      `<div class="row" title="${esc(e.label)} · ${e.channel}">${lamp('green')}${esc(e.id)}<small>${esc(e.vendor)}</small></div>`).join('');
-    $('services').innerHTML = (() => {
-      const rows = s.services.map((x) =>
-        `<div class="row" title="${esc(x.detail)}${x.declared ? '' : '\n未登记进 services.json（agentbd services init 可纳管）'}">` +
-        `${lamp(x.lamp)}${esc(x.label || x.id)}` +
-        `${x.declared ? '' : '<em class="undecl" title="未纳管">未登记</em>'}` +
-        `<small>${esc(x.id.startsWith('pid-') ? '' : x.id)}${x.ports.map(p=>':'+p).join(' ')}</small></div>`).join('');
-      const n = s.services.length, d = s.services.filter((x) => x.declared).length;
-      return (rows || '<div class="row">(无)</div>') +
-        `<div class="row total"><small>共 ${n} 个 · 已登记 ${d} · 现场发现 ${n - d}</small></div>`;
-    })();
-    $('mcp').innerHTML = s.mcp.map((m) =>
-      `<div class="row" title="${esc(m.target)}">${lamp(m.serviceLamp || (m.serviceId ? 'unknown' : 'green'))}${esc(m.name)}<small>${m.agents.length} agent</small><div class="mcp-target">${esc(m.target)}</div></div>`).join('') || '<div class="row">(无)</div>';
     const sel = $('engine');
     if (sel.options.length !== s.engines.length) {
       sel.innerHTML = s.engines.map((e) => `<option value="${e.id}">${esc(e.id)}</option>`).join('');
     }
     try {
       const st = await (await fetch('/api/stats')).json();
-      const rows = (st.byEngine || []).map((r) =>
-        `<div class="row">${lamp('green')}${esc(r.engine)}<small>${r.turns} 轮 · ${r.tokens} tok · $${Number(r.costUsd).toFixed(4)}</small></div>`).join('');
-      let budgetRow = '';
-      const b = st.budget;
-      if (b && b.limits) {
-        const parts = [];
-        if (b.limits.dailyTokens) parts.push(`今日 ${b.today.tokens}/${b.limits.dailyTokens} tok`);
-        if (b.limits.dailyUsd) parts.push(`今日 $${b.today.costUsd.toFixed(3)}/$${b.limits.dailyUsd}`);
-        if (b.limits.monthlyTokens) parts.push(`本月 ${b.month.tokens}/${b.limits.monthlyTokens} tok`);
-        if (b.limits.monthlyUsd) parts.push(`本月 $${b.month.costUsd.toFixed(2)}/$${b.limits.monthlyUsd}`);
-        if (parts.length) {
-          const over = (b.exceeded || []).length > 0;
-          budgetRow = `<div class="row">${lamp(over ? 'red' : 'green')}预算` +
-            `<small${over ? ' style="color:#f85149"' : ''}>${esc(parts.join(' · '))}${over ? ' ⚠ 超限（ask 已拦截）' : ''}</small></div>`;
-        }
-      }
-      $('stats').innerHTML = budgetRow + (st.total ? `<div class="row"><small>共 ${st.total.turns} 轮 · ${st.total.tokens} tok · $${Number(st.total.costUsd).toFixed(4)}</small></div>` : '') + (rows || '<div class="row">(无)</div>');
-    } catch { /* stats 可选，失败不打断面板 */ }
+      lastStats = st;
+    } catch { lastStats = null; }
+    renderSide();
   } catch (e) { $('status').textContent = '连接失败: ' + e; }
+}
+
+function renderSide() {
+  const s = lastState;
+  if (!s) return;
+  const f = filters();
+
+  // —— 引擎 ——
+  const engines = s.engines.filter((e) => hit(`${e.id} ${e.label} ${e.vendor}`, f));
+  $('engines').innerHTML = engines.map((e) =>
+    `<div class="row" title="${esc(e.label)} · ${e.channel}">${lamp('green')}${hl(e.id, f.q)}<small>${esc(e.vendor)}</small></div>`).join('') || '<div class="row">(无匹配)</div>';
+  setCount('c-engines', s.engines.length, engines.length);
+
+  // —— 本地服务：已登记 / 现场发现分组（44 条平铺太长）——
+  const svcRow = (x) => {
+    const label = x.label || x.id;
+    return `<div class="row" title="${esc(x.detail)}${x.declared ? '' : '\n未登记进 services.json（agentbd services init 可纳管）'}">` +
+      `${lamp(x.lamp)}${hl(label, f.q)}` +
+      `${x.declared ? '' : '<em class="undecl" title="未纳管">未登记</em>'}` +
+      `<small>${esc(x.id.startsWith('pid-') ? '' : x.id)}${x.ports.map(p=>':'+p).join(' ')}</small></div>`;
+  };
+  const keep = (x) => (!f.onlyUndecl || !x.declared) && hit(`${x.label || x.id} ${x.id} ${x.detail} ${x.ports.join(' ')}`, f);
+  const declared = s.services.filter(keep);
+  const fresh = s.services.filter((x) => !x.declared && keep(x));
+  $('services-ok').innerHTML = declared.map(svcRow).join('') || '<div class="row">(无匹配)</div>';
+  $('services-new').innerHTML = fresh.map(svcRow).join('') || '<div class="row">(无匹配)</div>';
+  const nDec = s.services.filter((x) => x.declared).length;
+  setCount('c-svc-ok', nDec, declared.length);
+  setCount('c-svc-new', s.services.length - nDec, fresh.length);
+
+  // —— MCP ——
+  const mcps = s.mcp.filter((m) => hit(`${m.name} ${m.target}`, f));
+  $('mcp').innerHTML = mcps.map((m) =>
+    `<div class="row" title="${esc(m.target)}">${lamp(m.serviceLamp || (m.serviceId ? 'unknown' : 'green'))}${hl(m.name, f.q)}<small>${m.agents.length} agent</small><div class="mcp-target">${esc(m.target)}</div></div>`).join('') || '<div class="row">(无匹配)</div>';
+  setCount('c-mcp', s.mcp.length, mcps.length);
+
+  // —— 用量 ——
+  const st = lastStats;
+  if (!st) { $('stats').innerHTML = '<div class="row">(未取到)</div>'; $('c-stats').textContent = ''; return; }
+  const rows = (st.byEngine || []).filter((r) => hit(r.engine, f)).map((r) =>
+    `<div class="row">${lamp('green')}${hl(r.engine, f.q)}<small>${r.turns} 轮 · ${r.tokens} tok · $${Number(r.costUsd).toFixed(4)}</small></div>`);
+  const b = st.budget;
+  if (b && b.limits) {
+    const parts = [];
+    if (b.limits.dailyTokens) parts.push(`今日 ${b.today.tokens}/${b.limits.dailyTokens} tok`);
+    if (b.limits.dailyUsd) parts.push(`今日 $${b.today.costUsd.toFixed(3)}/$${b.limits.dailyUsd}`);
+    if (b.limits.monthlyTokens) parts.push(`本月 ${b.month.tokens}/${b.limits.monthlyTokens} tok`);
+    if (b.limits.monthlyUsd) parts.push(`本月 $${b.month.costUsd.toFixed(2)}/$${b.limits.monthlyUsd}`);
+    if (parts.length) {
+      const over = (b.exceeded || []).length > 0;
+      rows.unshift(`<div class="row">${lamp(over ? 'red' : 'green')}预算` +
+        `<small${over ? ' style="color:#f85149"' : ''}>${esc(parts.join(' · '))}${over ? ' ⚠ 超限（ask 已拦截）' : ''}</small></div>`);
+    }
+  }
+  if (st.total) rows.push(`<div class="row"><small>共 ${st.total.turns} 轮 · ${st.total.tokens} tok · $${Number(st.total.costUsd).toFixed(4)}</small></div>`);
+  $('stats').innerHTML = rows.join('') || '<div class="row">(无匹配)</div>';
+  setCount('c-stats', (st.byEngine || []).length);
 }
 const es = new EventSource('/events');
 es.onmessage = (m) => {
@@ -248,6 +310,16 @@ async function send() {
 }
 $('send').onclick = send;
 $('prompt').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
+// 筛选：输入即本地重渲染（不重新 fetch），且自动展开有命中的分组
+$('q').addEventListener('input', () => {
+  renderSide();
+  if ($('q').value.trim()) for (const el of document.querySelectorAll('section.grp')) el.open = true;
+});
+$('onlyUndecl').querySelector('input').addEventListener('change', () => {
+  renderSide();
+  if (filters().onlyUndecl) $('g-svc-new').open = true;
+});
+
 refresh(); setInterval(refresh, 5000);
 </script>
 </body>
