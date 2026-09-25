@@ -194,6 +194,16 @@ export const BUILTIN_ENGINES: EngineSpec[] = [
     authHint: '复用 ~/.local/share/opencode 的 provider 凭证（opencode auth list）',
     note: '原生 ACP（`opencode acp`，v2.0.16 实测）；多 provider 聚合',
   },
+  {
+    id: 'openclaw',
+    label: 'OpenClaw',
+    vendor: 'OpenClaw',
+    command: 'openclaw',
+    args: ['acp'],
+    channel: 'acp',
+    authHint: '需要 openclaw gateway 在跑（launchd ai.openclaw.gateway，:18790）；凭证走 gateway',
+    note: '原生 ACP bridge（`openclaw acp`，2026.8.1）；背靠 gateway，非独立进程',
+  },
 ];
 
 /* --------------------- Agnes 凭据（钥匙串 → provider env） --------------------- */
