@@ -162,10 +162,11 @@ function renderSide() {
   if (!s) return;
   const f = filters();
 
-  // —— 引擎 ——
+  // —— 引擎（灯色来自后端真实探测，不是写死的绿）——
   const engines = s.engines.filter((e) => hit(`${e.id} ${e.label} ${e.vendor}`, f));
   $('engines').innerHTML = engines.map((e) =>
-    `<div class="row" title="${esc(e.label)} · ${e.channel}">${lamp('green')}${hl(e.id, f.q)}<small>${esc(e.vendor)}</small></div>`).join('') || '<div class="row">(无匹配)</div>';
+    `<div class="row" title="${esc(e.engineDetail || e.label)} · ${e.channel}">` +
+    `${lamp(e.lamp)}${hl(e.id, f.q)}<small>${hl(e.engineDetail || e.vendor, f.q)}</small></div>`).join('') || '<div class="row">(无匹配)</div>';
   setCount('c-engines', s.engines.length, engines.length);
 
   // —— 本地服务：已登记 / 现场发现分组（44 条平铺太长）——

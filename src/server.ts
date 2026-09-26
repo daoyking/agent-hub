@@ -22,6 +22,7 @@ import { fileURLToPath } from 'node:url';
 import type * as acp from '@agentclientprotocol/sdk';
 import { BUILTIN_ENGINES, loadEngines, findEngine } from './registry.ts';
 import { runTurn } from './bus.ts';
+import { probe } from './doctor.ts';
 import { discover, probeService, loadManifest } from './services.ts';
 import { scanMcp, toAcpMcpServers } from './mcphub.ts';
 import { resolveResume, aggregateStats } from './sessions.ts';
@@ -37,7 +38,15 @@ import type { ApprovalRequest } from './normalize.ts';
 const UI_FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), 'ui.html');
 
 export type ServerState = {
-  engines: Array<{ id: string; label: string; vendor: string; channel: string }>;
+  engines: Array<{
+    id: string;
+    label: string;
+    vendor: string;
+    channel: string;
+    /** 引擎健康灯（由后台探测缓存得出；无数据时 unknown） */
+    lamp?: string;
+    engineDetail?: string;
+  }>;
   services: Array<{
     id: string;
     /** 人类可读名（面板显示这个，不显示 pid-xxxx） */
@@ -131,6 +140,7 @@ function broadcast(payload: Record<string, unknown>): void {
 }
 
 async function gatherState(): Promise<ServerState> {
+  ensureEngineHealthTimer();
   const probed: LocalService[] = await Promise.all(
     (await discover()).map(async (s) => ({ ...s, health: await probeService(s, 'l1') })),
   );
@@ -171,11 +181,65 @@ async function gatherState(): Promise<ServerState> {
       label: e.label,
       vendor: e.vendor,
       channel: e.channel,
+      // 引擎健康：来自 engine-health 缓存（见 engineHealth()）。缺数据时 lamp=unknown
+      // ——**不能写死 green**：那样任何坏掉的引擎在面板上都是绿灯。
+      lamp: engineHealth.get(e.id)?.lamp ?? 'unknown',
+      engineDetail: engineHealth.get(e.id)?.detail ?? '',
     })),
     services,
     mcp,
     at: Date.now(),
   };
+}
+
+/**
+ * 引擎健康缓存。
+ *
+ * 为什么需要：面板 5s 轮询一次 /api/state，而一次完整 doctor 要 spawn 全部
+ * 引擎握手（本机实测 8 个 ≈ 15s）。直接在 gatherState 里探测会把面板请求
+ * 拖死。所以走「后台定时探测 + 内存缓存」：每 60s 刷新一次，:7787 只读缓存。
+ *
+ * 灯色语义与服务灯一致：green 可用 / red 探不通 / grey 未安装 / unknown 没数据。
+ */
+const ENGINE_HEALTH_TTL_MS = 60_000;
+let lastEngineProbeAt = 0;
+let engineHealth = new Map<string, { lamp: string; detail: string }>();
+let engineHealthTimer: NodeJS.Timeout | null = null;
+let engineHealthBusy = false;
+
+async function probeEngines(): Promise<void> {
+  if (engineHealthBusy) return;
+  engineHealthBusy = true;
+  try {
+    const results = await Promise.all(loadEngines().map((s) => probe(s).catch(() => null)));
+    const next = new Map<string, { lamp: string; detail: string }>();
+    for (const [i, r] of results.entries()) {
+      const spec = loadEngines()[i]!;
+      if (r?.ok) {
+        const ver = r.profile?.agentInfo?.version;
+        next.set(spec.id, { lamp: 'green', detail: `可用${ver ? ` · v${ver}` : ''}` });
+      } else {
+        const err = r?.error ?? '未知错误';
+        // 二进制都不存在 = 没装（grey），比"装了但坏了"（red）更准确
+        const missing = /不存在|ENOENT/i.test(err);
+        next.set(spec.id, { lamp: missing ? 'grey' : 'red', detail: err.split('\n')[0]!.slice(0, 160) });
+      }
+    }
+    engineHealth = next;
+  } finally {
+    lastEngineProbeAt = Date.now();
+    engineHealthBusy = false;
+  }
+}
+
+function ensureEngineHealthTimer(): void {
+  if (engineHealthTimer) return;
+  void probeEngines(); // 首次立即填，之后靠 TTL
+  engineHealthTimer = setInterval(() => {
+    if (Date.now() - lastEngineProbeAt < ENGINE_HEALTH_TTL_MS) return;
+    void probeEngines();
+  }, 15_000);
+  engineHealthTimer.unref?.();
 }
 
 async function readBody(req: IncomingMessage): Promise<Record<string, unknown>> {
