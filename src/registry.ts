@@ -195,6 +195,16 @@ export const BUILTIN_ENGINES: EngineSpec[] = [
     note: '原生 ACP（`opencode acp`，v2.0.16 实测）；多 provider 聚合',
   },
   {
+    id: 'omp',
+    label: 'Oh My Pi',
+    vendor: 'Oh My Pi',
+    command: 'omp',
+    args: ['acp'],
+    channel: 'acp',
+    authHint: '复用 omp 自己的 provider 凭证（omp auth）',
+    note: '原生 ACP（`omp acp`，oh-my-pi 18.3.0 实测）；能力最全：含 fork/resume/addDirs',
+  },
+  {
     id: 'openclaw',
     label: 'OpenClaw',
     vendor: 'OpenClaw',
