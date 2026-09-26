@@ -375,6 +375,29 @@ async function processAlive(expectCmdline: string): Promise<boolean | undefined>
   }
 }
 
+/**
+ * 按服务分档选择探测级别。
+ *
+ * 为什么不能面板统一开 L2：L2 需要**声明探测路径**（manifest 的 l2 或
+ * L2_HINTS 里的端口默认值），没声明的服务会被判成 `unknown`（"假活风险未知"）——
+ * 那个判断对 `services --l2` 这种显式命令是对的，但对面板是噪音：本机 45 个
+ * 服务只有 5 个配了 l2，统一开 L2 会让 28 个服务从 🟢 掉到 ⚪，**把真故障
+ * 淹在里面**。
+ *
+ * 所以：声明了 l2 路径的升到 L2（能抓"端口在听但应用已死"的假活），
+ * 其余保持 L1。实测两档并发都在 1s 左右，成本可接受。
+ */
+export function probeLevelFor(svc: LocalService): ProbeLevel {
+  const port = svc.ports[0];
+  const declared = !!svc.l2 || (port !== undefined && !!L2_HINTS[port]);
+  return declared ? 'l2' : 'l1';
+}
+
+/** 按分档探测全部服务（面板/托盘用） */
+export async function probeAll(list: LocalService[]): Promise<LocalService[]> {
+  return Promise.all(list.map(async (s) => ({ ...s, health: await probeService(s, probeLevelFor(s)) })));
+}
+
 export async function probeService(svc: LocalService, level: ProbeLevel): Promise<Health> {
   const at = Date.now();
   const port = svc.ports[0];

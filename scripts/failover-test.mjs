@@ -167,5 +167,43 @@ check('★ 软链目录逃逸 → 拒绝', throws(path.join(root, 'inside', 'esc
 check('★ 软链文件逃逸 → 拒绝', throws(path.join(root, 'passwd-link')), true);
 rmSync(root, { recursive: true, force: true });
 
+// —— 审批：onAsk 出问题必须 fail-closed（安全关键）——
+const { decide } = await import('../src/policy.ts');
+const req = {
+  sessionId: 's', toolCallId: 't', risk: 'high', kind: 'execute', title: 'rm -rf', tool: 'shell',
+  options: [{ optionId: 'allow_1', kind: 'allow_once', name: '允许' }, { optionId: 'no_1', kind: 'reject_once', name: '拒绝' }],
+  rawInput: {},
+};
+const isDeny = (d) => d.action === 'cancel' || d.optionId === 'no_1';
+console.log('\n=== 审批 fail-closed（onAsk 出问题不得放行）===');
+process.env.AGENTBD_ASK_TIMEOUT_MS = '250';
+const dErr = await decide(req, 'guard', async () => { throw new Error('stdin 已关闭'); });
+check('onAsk 抛异常 → 拒绝', isDeny(dErr), true);
+check('异常原因记进 reason', dErr.reason, 'user-ask-error');
+const dHang = await decide(req, 'guard', () => new Promise(() => {}));
+check('onAsk 永不返回 → 超时拒绝', isDeny(dHang), true);
+check('超时原因记进 reason', dHang.reason, 'user-ask-timeout');
+const dOk = await decide(req, 'guard', async () => true);
+check('onAsk 明确允许 → 放行', dOk.optionId, 'allow_1');
+const dNo = await decide(req, 'guard');
+check('无 handler → 拒绝', isDeny(dNo), true);
+check('deny 模式 → 拒绝', (await decide(req, 'deny', async () => true)).action, 'cancel');
+// auto 是**刻意**不询问（"我现在信任这个引擎"，见 policy.ts 头部说明），
+// 所以 onAsk 抛不抛异常都无关——但必须锁住"auto 真的不调 onAsk"这条语义，
+// 防止将来有人"顺手"改成也去问，那会让 --auto 失去意义并卡住自动化。
+let autoCalled = false;
+const dAuto = await decide(req, 'auto', async () => { autoCalled = true; return false; });
+check('auto 模式不询问（直接放行）', dAuto.optionId, 'allow_1');
+check('auto 模式压根不调 onAsk', autoCalled, false);
+delete process.env.AGENTBD_ASK_TIMEOUT_MS;
+
+// —— 分档探测：只有声明了 l2 的服务才升 L2（否则面板会被 unknown 淹没）——
+const { probeLevelFor } = await import('../src/services.ts');
+console.log('\n=== 探测分档（有 l2 声明才升 L2）===');
+const mk = (ports, l2) => ({ id: 'x', label: 'x', managed: 'unmanaged', ports, l2 });
+check('声明了 l2 → l2', probeLevelFor(mk([8080], { path: '/health' })), 'l2');
+check('没声明 l2 → l1（保持绿，不变 unknown）', probeLevelFor(mk([9999])), 'l1');
+check('无端口 → l1（走进程存活探针）', probeLevelFor(mk([])), 'l1');
+
 console.log(failed === 0 ? '\n全部通过' : `\n${failed} 项失败`);
 process.exit(failed === 0 ? 0 : 1);

@@ -23,7 +23,7 @@ import type * as acp from '@agentclientprotocol/sdk';
 import { BUILTIN_ENGINES, loadEngines, findEngine } from './registry.ts';
 import { runTurn } from './bus.ts';
 import { probe } from './doctor.ts';
-import { discover, probeService, loadManifest } from './services.ts';
+import { discover, probeService, probeAll, loadManifest } from './services.ts';
 import { scanMcp, toAcpMcpServers } from './mcphub.ts';
 import { resolveResume, aggregateStats } from './sessions.ts';
 import { checkBudget } from './budget.ts';
@@ -144,7 +144,7 @@ function broadcast(payload: Record<string, unknown>): void {
 async function gatherState(): Promise<ServerState> {
   ensureEngineHealthTimer();
   const probed: LocalService[] = await Promise.all(
-    (await discover()).map(async (s) => ({ ...s, health: await probeService(s, 'l1') })),
+    await probeAll(await discover()),
   );
   const manifest = await loadManifest();
   const declared = new Set(manifest.services.map((x) => x.id));
