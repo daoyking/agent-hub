@@ -14,6 +14,7 @@ import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
+import { realpathSync } from 'node:fs';
 import { launch, explainStderr } from './transport.ts';
 import type { EngineSpec } from './registry.ts';
 import { normalize, toApprovalRequest } from './normalize.ts';
@@ -80,12 +81,49 @@ function assertNotNested(): void {
 }
 
 /** 只允许 client fs 能力在会话根目录内活动 */
-function assertInside(root: string, target: string): void {
+/**
+ * 会话根目录约束：agent 只能读写 `--cwd` 内的文件。
+ *
+ * **必须用 realpath 解析符号链接**。只做 `path.relative` 的字符串判断能被
+ * 符号链接绕过：cwd 里放一个 `escape -> /etc` 的软链，agent 请求
+ * `<cwd>/escape/passwd`，字符串上"在根内"就放行了，实际读的是 /etc/passwd。
+ * 实测确认过这条绕过路径。
+ *
+ * 两段校验：
+ *   1. 字符串层：挡 `..` 和绝对路径（快，且能给出可读的拒绝理由）
+ *   2. 真实路径层：resolve 软链后重新判断（root 本身也要 resolve，
+ *      否则 cwd 自己就是软链时两边算法不一致）
+ * 任一层不通过就抛错——**fail-closed**。
+ */
+export function assertInside(root: string, target: string): void {
+  const rootAbs = path.resolve(root);
   const resolved = path.resolve(target);
-  const rel = path.relative(path.resolve(root), resolved);
-  if (rel === '') return;
-  if (rel.startsWith('..') || path.isAbsolute(rel)) {
+
+  const rel = path.relative(rootAbs, resolved);
+  if (rel !== '' && (rel.startsWith('..') || path.isAbsolute(rel))) {
     throw new Error(`拒绝越界访问: ${resolved} 不在会话根 ${root} 内`);
+  }
+
+  // 目标可能还不存在（写入新文件），realpath 失败时退回 dirname 再试
+  const realOf = (p: string): string => {
+    try {
+      return realpathSync.native(p);
+    } catch {
+      try {
+        return path.join(realpathSync.native(path.dirname(p)), path.basename(p));
+      } catch {
+        return p;
+      }
+    }
+  };
+  const realRoot = realOf(rootAbs);
+  const realTarget = realOf(resolved);
+  const relReal = path.relative(realRoot, realTarget);
+  if (relReal.startsWith('..') || path.isAbsolute(relReal)) {
+    throw new Error(
+      `拒绝越界访问: ${resolved} 解析到 ${realTarget}，在会话根 ${realRoot} 外` +
+        `（疑似符号链接逃逸）`,
+    );
   }
 }
 

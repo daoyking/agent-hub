@@ -146,5 +146,26 @@ check('stdio → unknown（不假装健康）', byName['zai-mcp-server']?.lamp, 
 check('stdio computer-use → unknown', byName['computer-use']?.lamp, 'unknown');
 check('stdio node_repl → unknown', byName['node_repl']?.lamp, 'unknown');
 
+// —— 沙箱越界：符号链接逃逸（安全关键）——
+const { assertInside } = await import('../src/bus.ts');
+const { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, rmSync } = await import('node:fs');
+const { tmpdir } = await import('node:os');
+const path = await import('node:path');
+const root = mkdtempSync(path.join(tmpdir(), 'agentbd-esc-'));
+mkdirSync(path.join(root, 'inside'));
+writeFileSync(path.join(root, 'ok.txt'), 'x');
+symlinkSync('/etc', path.join(root, 'inside', 'escape'));   // cwd 内指向 /etc 的软链
+symlinkSync('/etc/passwd', path.join(root, 'passwd-link'));  // 直接指向文件的软链
+console.log('\n=== 沙箱越界（符号链接逃逸）===');
+const throws = (target) => { try { assertInside(root, target); return false; } catch { return true; } };
+check('根内普通文件 → 允许', throws(path.join(root, 'ok.txt')), false);
+check('根目录本身 → 允许', throws(root), false);
+check('子目录 → 允许', throws(path.join(root, 'inside')), false);
+check('.. 越界 → 拒绝', throws(path.join(root, '..', 'etc', 'passwd')), true);
+check('绝对路径越界 → 拒绝', throws('/etc/passwd'), true);
+check('★ 软链目录逃逸 → 拒绝', throws(path.join(root, 'inside', 'escape', 'passwd')), true);
+check('★ 软链文件逃逸 → 拒绝', throws(path.join(root, 'passwd-link')), true);
+rmSync(root, { recursive: true, force: true });
+
 console.log(failed === 0 ? '\n全部通过' : `\n${failed} 项失败`);
 process.exit(failed === 0 ? 0 : 1);
