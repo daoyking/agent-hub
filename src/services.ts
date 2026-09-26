@@ -23,11 +23,11 @@ const LAUNCH_AGENTS = path.join(homedir(), 'Library', 'LaunchAgents');
 const UID = process.getuid?.() ?? 501;
 
 export type Health = {
-  l1: 'up' | 'down' | 'unknown' | 'stopped';
+  l1: 'up' | 'down' | 'unknown' | 'stopped' | 'idle';
   l2: 'ok' | 'fail' | 'skipped';
   l3: 'ok' | 'fail' | 'skipped';
-  /** 综合灯：green 可用 / amber 假活或降级 / red 不可用 / unknown 未测 / grey 已停止 */
-  lamp: 'green' | 'amber' | 'red' | 'unknown' | 'grey';
+  /** 综合灯：green 可用 / amber 假活或降级 / red 不可用 / grey 已停止 / idle 无从探测 / unknown 未测 */
+  lamp: 'green' | 'amber' | 'red' | 'unknown' | 'grey' | 'idle';
   detail: string;
   /** 结论年龄（毫秒）——聚合取最老，见技能 §3.5 */
   at: number;
@@ -393,7 +393,13 @@ export async function probeService(svc: LocalService, level: ProbeLevel): Promis
         return h;
       }
     }
-    h.detail = '未声明端口';
+    // 无端口、也没配 expectCmdline → **无从探测**（不是"没测"，是"没法测"）。
+    // 典型：纯 launchd 标签条目（dsh-web / alt-tab-macos / v2ray-core 这类守护型，
+    // 不对外开端口，init 生成的骨架也没带 expectCmdline）。标成 idle 以区别于
+    // 真正的 unknown，避免"⚪"既代表已停止又代表无从探测。
+    h.l1 = 'idle';
+    h.lamp = 'idle';
+    h.detail = '无端口且未声明 expectCmdline（无从探测）';
     return h;
   }
   const t0 = Date.now();
@@ -702,10 +708,11 @@ export function aggregateLamp(xs: Health[]): { lamp: Health['lamp']; oldestMs: n
   const oldestMs = Date.now() - Math.min(...xs.map((h) => h.at));
   if (xs.some((h) => h.lamp === 'red')) return { lamp: 'red', oldestMs };
   if (xs.some((h) => h.lamp === 'amber')) return { lamp: 'amber', oldestMs };
-  // grey（已停止）和 unknown（未测）都**不是失败**：只要剩下的都绿就该是绿。
-  // （旧实现用 every(green)，混进一个 grey 就掉到 unknown，等于让"停掉的旧服务"
-  //  把整盏灯变成"未测"——这正是历史条目看起来一直在报警的另一半原因。）
-  const assessed = xs.filter((h) => h.lamp !== 'grey' && h.lamp !== 'unknown');
+  // grey（已停止）和 idle（无从探测）、unknown（未测）都不是失败：
+  // 只要剩下可判定的都绿就该是绿。
+  // （旧实现用 every(green)，混进一个 grey 就掉到 unknown —— 等于让"停掉的旧服务"
+  //  把整盏灯变成"未测"。）
+  const assessed = xs.filter((h) => h.lamp !== 'grey' && h.lamp !== 'idle' && h.lamp !== 'unknown');
   if (assessed.length > 0 && assessed.every((h) => h.lamp === 'green')) {
     return { lamp: 'green', oldestMs };
   }

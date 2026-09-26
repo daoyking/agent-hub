@@ -128,6 +128,10 @@ check('green+grey → 绿（停掉的旧服务不拉低整体）', aggregateLamp
 check('green+grey+unknown → 绿', aggregateLamp([H('green'), H('grey'), H('unknown')]).lamp, 'green');
 check('red 优先于 grey', aggregateLamp([H('grey'), H('red')]).lamp, 'red');
 check('全 grey → unknown（无可判定）', aggregateLamp([H('grey'), H('grey')]).lamp, 'unknown');
+check('idle（无从探测）不拉低整体', aggregateLamp([H('green'), H('idle')]).lamp, 'green');
+check('green+grey+idle → 绿', aggregateLamp([H('green'), H('grey'), H('idle')]).lamp, 'green');
+check('red 优先于 idle', aggregateLamp([H('idle'), H('red')]).lamp, 'red');
+check('全 idle → unknown（无可判定）', aggregateLamp([H('idle')]).lamp, 'unknown');
 check('空 → unknown', aggregateLamp([]).lamp, 'unknown');
 
 console.log(failed === 0 ? '\n全部通过' : `\n${failed} 项失败`);

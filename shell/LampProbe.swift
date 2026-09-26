@@ -1,7 +1,7 @@
 /**
  * 托盘灯色判定 —— 从 AppDelegate 里抽出来，单独可测（shell/lamp-test.swift）。
  * 规则：所有服务里最差的一档胜出：red > amber > 其他。
- * grey（已停止：plist 在但未 launchctl load）和 unknown 都**不算故障**——
+ * grey（已停止：plist 在但未 launchctl load）、idle（无从探测）、unknown 都不算故障——
  * 停掉的历史服务不该把托盘灯拉红。
  */
 import Foundation

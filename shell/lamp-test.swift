@@ -29,6 +29,10 @@ struct LampTest {
         check("grey 混 amber 仍取 amber", worstLamp(fromStateJSON: state(["grey", "amber"])), "amber", &failed)
         check("red 优先于 grey", worstLamp(fromStateJSON: state(["grey", "red"])), "red", &failed)
         check("全 grey 不报警", worstLamp(fromStateJSON: state(["grey", "grey"])), "green", &failed)
+        // idle = 无从探测（无端口且无 expectCmdline），同样不是故障
+        check("idle 不压低绿", worstLamp(fromStateJSON: state(["idle", "green"])), "green", &failed)
+        check("grey+idle 混 amber 仍取 amber", worstLamp(fromStateJSON: state(["grey", "idle", "amber"])), "amber", &failed)
+        check("全 idle 不报警", worstLamp(fromStateJSON: state(["idle", "idle"])), "green", &failed)
         check("空服务列表", worstLamp(fromStateJSON: state([])), "green", &failed)
         check("坏 JSON", worstLamp(fromStateJSON: Data("not json".utf8)), "green", &failed)
         check("缺 services 字段", worstLamp(fromStateJSON: Data("{\"engines\":[]}".utf8)), "green", &failed)

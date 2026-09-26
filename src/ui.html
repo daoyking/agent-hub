@@ -16,6 +16,8 @@
   .green{background:#3fb950}.red{background:#f85149}.amber{background:#d29922}.unknown{background:#6e7681}
   /* grey = 已停止（plist 在但没 load）：不是故障，不该和红灯一样刺眼 */
   .grey{background:#4a5058}
+  /* idle = 无从探测（无端口且无 expectCmdline）：空心圈，区别于 unknown 的实心 */
+  .idle{background:transparent;border:1.5px solid #6e7681;box-sizing:border-box;}
   .row { padding:6px 8px; border-radius:6px; display:flex; align-items:center; gap:4px; }
   .row:hover { background:var(--panel); }
   .row small { color:var(--dim); margin-left:auto; font-size:11px; }
@@ -174,7 +176,7 @@ function renderSide() {
     return `<div class="row"${faded} title="${esc(x.detail)}${x.declared ? '' : '\n未登记进 services.json（agentbd services init 可纳管）'}">` +
       `${lamp(x.lamp)}${hl(label, f.q)}` +
       `${x.declared ? '' : '<em class="undecl" title="未纳管">未登记</em>'}` +
-      `${x.lamp === 'grey' ? '<em class="stopped" title="plist 存在但未 launchctl load">已停止</em>' : ''}` +
+      `${x.lamp === 'grey' ? '<em class="stopped" title="plist 存在但未 launchctl load">已停止</em>' : ''}${x.lamp === 'idle' ? '<em class="stopped" title="无端口且未声明 expectCmdline，无法探测存活">无从探测</em>' : ''}` +
       `<small>${esc(x.id.startsWith('pid-') ? '' : x.id)}${x.ports.map(p=>':'+p).join(' ')}</small></div>`;
   };
   const keep = (x) => (!f.onlyUndecl || !x.declared) && hit(`${x.label || x.id} ${x.id} ${x.detail} ${x.ports.join(' ')}`, f);

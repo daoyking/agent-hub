@@ -485,7 +485,7 @@ async function cmdBudget(args: string[]): Promise<void> {
 }
 
 // grey（已停止）刻意区别于 red（故障）：停掉的历史服务不该看起来像在报警
-const LAMP_ICON: Record<string, string> = { green: '🟢', amber: '🟡', red: '🔴', grey: '⚫', unknown: '⚪' };
+const LAMP_ICON: Record<string, string> = { green: '🟢', amber: '🟡', red: '🔴', grey: '⚫', idle: '◌', unknown: '⚪' };
 
 function fmtAge(ms: number): string {
   if (!Number.isFinite(ms)) return '未知';
@@ -571,7 +571,7 @@ async function cmdServices(flags: Flags): Promise<void> {
     const mcpTag = s.mcp?.url ? ' [mcp]' : '';
     // 显示 label（人类可读名），不是 pid-xxxxx；未纳管的额外打标
     const name = s.label || s.id;
-    const tag = (declared.has(s.id) ? '' : ' [未登记]') + (h.lamp === 'grey' ? ' [已停止]' : '');
+    const tag = (declared.has(s.id) ? '' : ' [未登记]') + (h.lamp === 'grey' ? ' [已停止]' : h.lamp === 'idle' ? ' [无从探测]' : '');
     console.log(`${LAMP_ICON[h.lamp]} ${(name + tag).padEnd(40)} ${port.padEnd(14)} ${String(s.managed).padEnd(11)}${mcpTag}`);
     console.log(`     ${h.detail}`);
   }
