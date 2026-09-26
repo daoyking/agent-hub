@@ -344,6 +344,38 @@ $ agentbd serve uninstall  # 一键还原
 重点锁住「软失败」——agnesd 把上游错误写进正文再 `end_turn`，不特判就会把失败回合
 静默当成功返回。这类 bug 静默且难复现，必须有回归。
 
+### 灯色语义（六档）
+
+面板/CLI/托盘共用一套灯色，**每一档都对应一个明确的问题**：
+
+| 灯 | 状态 | 含义 | 该做什么 |
+|---|---|---|---|
+| 🟢 | green | 可用 | — |
+| 🟡 | amber | 假活 / 降级 | 看 detail 里的 L2 结果 |
+| 🔴 | red | 故障 | 进程/端口在但不健康 |
+| ⚫ | grey | **已停止** | plist 在但 `launchctl` 没加载（换机器/主动 unload/不用了） |
+| ◌ | idle | **无从探测** | 无端口且无 `expectCmdline`，**没法测**（不是"没测"） |
+| ⚪ | unknown | 未测 | 探测未完成 |
+
+`grey` 和 `idle` **都不算故障**——停掉的旧服务不该把整盏灯拉红。它们在
+`aggregateLamp` 里被排除在「可判定」之外（"不可判定" ≠ "失败"）。
+
+**把 idle 变成可判定**：给 `services.json` 里的条目补 `expectCmdline`
+（守护型服务靠进程存活探测）。取值来自 plist 的 `ProgramArguments`，但要避开
+三个坑（`discover()` 里的 GENERIC_EXE 同源问题）：
+
+1. **别用通用解释器当特征** — `/usr/bin/script`、`/bin/bash`、`/opt/homebrew/bin/node`
+   会张冠李戴到别的进程上；取 `args[1]` 那个真正的脚本/模块路径。
+2. **plist 用 `Program` 而非 `ProgramArguments`** — `PlistBuddy -c 'Print :ProgramArguments'`
+   会直接报错，两个键都要试。
+3. **plist 可能已过时** — 实测 `com.jindy.launchagent-manager` 的 plist 指向
+   `server.js`，实际跑的是 `macos/build/LocalServiceHub.app`；按 plist 填会得到
+   一个**永远为红**的假故障。发现报红时用 `pgrep -fl <关键字>` 复核，以**实际
+   进程**为准。
+
+一次性任务（如 `com.winclaw.uninstall-watcher`，`StartInterval` + 跑完自删
+plist）保持 idle 才是对的——"进程不在"本就是它的正常态。
+
 ## 下一步
 
 **P1 已收官（2026-09-23）**：清单项全部完成或查明关闭——AgnesCode 接入（§9）、会话恢复（§10）、
