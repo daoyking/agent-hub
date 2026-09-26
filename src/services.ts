@@ -23,11 +23,11 @@ const LAUNCH_AGENTS = path.join(homedir(), 'Library', 'LaunchAgents');
 const UID = process.getuid?.() ?? 501;
 
 export type Health = {
-  l1: 'up' | 'down' | 'unknown';
+  l1: 'up' | 'down' | 'unknown' | 'stopped';
   l2: 'ok' | 'fail' | 'skipped';
   l3: 'ok' | 'fail' | 'skipped';
-  /** 综合灯：green 可用 / amber 假活或降级 / red 不可用 / unknown 未测 */
-  lamp: 'green' | 'amber' | 'red' | 'unknown';
+  /** 综合灯：green 可用 / amber 假活或降级 / red 不可用 / unknown 未测 / grey 已停止 */
+  lamp: 'green' | 'amber' | 'red' | 'unknown' | 'grey';
   detail: string;
   /** 结论年龄（毫秒）——聚合取最老，见技能 §3.5 */
   at: number;
@@ -401,8 +401,17 @@ export async function probeService(svc: LocalService, level: ProbeLevel): Promis
   h.ms = Date.now() - t0;
   h.l1 = up ? 'up' : 'down';
   if (!up) {
-    h.lamp = 'red';
-    h.detail = `L1 ${port} 未监听`;
+    // 「已停止」和「不健康」是两回事，混为一谈会让历史条目永远挂红灯：
+    //  - plist-only：plist 在，但 launchd **没加载**它 → 服务本来就没在跑
+    //    （比如换机器、主动 unload、或这个服务你已经不用了）→ grey 已停止
+    //  - launchd：加载了却不监听 → 真的坏了/崩了 → red
+    //  - unmanaged：没有 plist 可依据，无从判断是"停"还是"崩" → 保持 red
+    const stopped = svc.managed === 'plist-only';
+    h.l1 = stopped ? 'stopped' : 'down';
+    h.lamp = stopped ? 'grey' : 'red';
+    h.detail = stopped
+      ? `L1 ${port} 未监听 · plist 存在但未 launchctl load（已停止）`
+      : `L1 ${port} 未监听`;
     return h;
   }
 
@@ -693,7 +702,13 @@ export function aggregateLamp(xs: Health[]): { lamp: Health['lamp']; oldestMs: n
   const oldestMs = Date.now() - Math.min(...xs.map((h) => h.at));
   if (xs.some((h) => h.lamp === 'red')) return { lamp: 'red', oldestMs };
   if (xs.some((h) => h.lamp === 'amber')) return { lamp: 'amber', oldestMs };
-  if (xs.every((h) => h.lamp === 'green')) return { lamp: 'green', oldestMs };
+  // grey（已停止）和 unknown（未测）都**不是失败**：只要剩下的都绿就该是绿。
+  // （旧实现用 every(green)，混进一个 grey 就掉到 unknown，等于让"停掉的旧服务"
+  //  把整盏灯变成"未测"——这正是历史条目看起来一直在报警的另一半原因。）
+  const assessed = xs.filter((h) => h.lamp !== 'grey' && h.lamp !== 'unknown');
+  if (assessed.length > 0 && assessed.every((h) => h.lamp === 'green')) {
+    return { lamp: 'green', oldestMs };
+  }
   return { lamp: 'unknown', oldestMs };
 }
 

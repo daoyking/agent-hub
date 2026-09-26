@@ -24,6 +24,11 @@ struct LampTest {
         check("含 red", worstLamp(fromStateJSON: state(["green", "amber", "red"])), "red", &failed)
         check("red 在首位", worstLamp(fromStateJSON: state(["red", "green"])), "red", &failed)
         check("unknown 不压低", worstLamp(fromStateJSON: state(["unknown", "green"])), "green", &failed)
+        // grey（已停止：plist 在但未 launchctl load）不是故障，不能像红灯一样刺眼
+        check("grey 不压低绿", worstLamp(fromStateJSON: state(["grey", "green"])), "green", &failed)
+        check("grey 混 amber 仍取 amber", worstLamp(fromStateJSON: state(["grey", "amber"])), "amber", &failed)
+        check("red 优先于 grey", worstLamp(fromStateJSON: state(["grey", "red"])), "red", &failed)
+        check("全 grey 不报警", worstLamp(fromStateJSON: state(["grey", "grey"])), "green", &failed)
         check("空服务列表", worstLamp(fromStateJSON: state([])), "green", &failed)
         check("坏 JSON", worstLamp(fromStateJSON: Data("not json".utf8)), "green", &failed)
         check("缺 services 字段", worstLamp(fromStateJSON: Data("{\"engines\":[]}".utf8)), "green", &failed)

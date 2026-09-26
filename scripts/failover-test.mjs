@@ -117,5 +117,18 @@ for (const [name, exe, cmd, want] of names) {
 // lsof 的 \xNN 转义还原（中文应用名曾是 M-fM-5M-.M-eM-<M^U）
 check('中文名从 \\xNN 还原', friendlyName('node', '/Applications/浮引.app/x'), '浮引');
 
+// —— 灯色聚合：grey（已停止）不是失败 ——
+const { aggregateLamp } = await import('../src/services.ts');
+const H = (lamp) => ({ l1: 'up', l2: 'skipped', l3: 'skipped', lamp, detail: '', at: Date.now() });
+console.log('\n=== 灯色聚合（grey=已停止 不是故障）===');
+check('全绿 → 绿', aggregateLamp([H('green'), H('green')]).lamp, 'green');
+check('有 red → 红', aggregateLamp([H('green'), H('red')]).lamp, 'red');
+check('有 amber → 黄', aggregateLamp([H('green'), H('amber')]).lamp, 'amber');
+check('green+grey → 绿（停掉的旧服务不拉低整体）', aggregateLamp([H('green'), H('grey')]).lamp, 'green');
+check('green+grey+unknown → 绿', aggregateLamp([H('green'), H('grey'), H('unknown')]).lamp, 'green');
+check('red 优先于 grey', aggregateLamp([H('grey'), H('red')]).lamp, 'red');
+check('全 grey → unknown（无可判定）', aggregateLamp([H('grey'), H('grey')]).lamp, 'unknown');
+check('空 → unknown', aggregateLamp([]).lamp, 'unknown');
+
 console.log(failed === 0 ? '\n全部通过' : `\n${failed} 项失败`);
 process.exit(failed === 0 ? 0 : 1);

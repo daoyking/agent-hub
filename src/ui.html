@@ -14,10 +14,14 @@
   h1 { font-size:16px; margin:0 0 12px; } h2 { font-size:12px; color:var(--dim); margin:18px 0 6px; text-transform:uppercase; letter-spacing:.08em; }
   .lamp { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px; }
   .green{background:#3fb950}.red{background:#f85149}.amber{background:#d29922}.unknown{background:#6e7681}
+  /* grey = 已停止（plist 在但没 load）：不是故障，不该和红灯一样刺眼 */
+  .grey{background:#4a5058}
   .row { padding:6px 8px; border-radius:6px; display:flex; align-items:center; gap:4px; }
   .row:hover { background:var(--panel); }
   .row small { color:var(--dim); margin-left:auto; font-size:11px; }
   em.undecl { font-style:normal; font-size:10px; color:#d29922; border:1px solid #3a3020; border-radius:4px; padding:0 4px; margin-right:6px; }
+  em.stopped { font-style:normal; font-size:10px; color:var(--dim); border:1px solid var(--line); border-radius:4px; padding:0 4px; margin-right:6px; }
+  em.stopped { font-style:normal; font-size:10px; color:var(--dim); border:1px solid var(--line); border-radius:4px; padding:0 4px; margin-right:6px; }
   .mcp-target { color:var(--dim); font-size:11px; word-break:break-all; }
 
   /* ── 左栏：筛选 + 可折叠分组（服务变多后 44 条平铺太长）── */
@@ -165,9 +169,12 @@ function renderSide() {
   // —— 本地服务：已登记 / 现场发现分组（44 条平铺太长）——
   const svcRow = (x) => {
     const label = x.label || x.id;
-    return `<div class="row" title="${esc(x.detail)}${x.declared ? '' : '\n未登记进 services.json（agentbd services init 可纳管）'}">` +
+    // 已停止的整行淡一点，避免跟真正故障的红灯混在一起
+    const faded = x.lamp === 'grey' ? ' style="opacity:.5"' : '';
+    return `<div class="row"${faded} title="${esc(x.detail)}${x.declared ? '' : '\n未登记进 services.json（agentbd services init 可纳管）'}">` +
       `${lamp(x.lamp)}${hl(label, f.q)}` +
       `${x.declared ? '' : '<em class="undecl" title="未纳管">未登记</em>'}` +
+      `${x.lamp === 'grey' ? '<em class="stopped" title="plist 存在但未 launchctl load">已停止</em>' : ''}` +
       `<small>${esc(x.id.startsWith('pid-') ? '' : x.id)}${x.ports.map(p=>':'+p).join(' ')}</small></div>`;
   };
   const keep = (x) => (!f.onlyUndecl || !x.declared) && hit(`${x.label || x.id} ${x.id} ${x.detail} ${x.ports.join(' ')}`, f);
