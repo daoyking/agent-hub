@@ -191,8 +191,11 @@ function renderSide() {
 
   // —— MCP ——
   const mcps = s.mcp.filter((m) => hit(`${m.name} ${m.target}`, f));
+  // 灯色用后端算好的 m.lamp；**没有就 unknown**，不兜底成绿色
+  // （旧代码 `serviceLamp || (serviceId ? 'unknown' : 'green')` 会把指向死端口的
+  //  http MCP 标绿——实测 browseros-neo :9010 无人监听却是绿灯）。
   $('mcp').innerHTML = mcps.map((m) =>
-    `<div class="row" title="${esc(m.target)}">${lamp(m.serviceLamp || (m.serviceId ? 'unknown' : 'green'))}${hl(m.name, f.q)}<small>${m.agents.length} agent</small><div class="mcp-target">${esc(m.target)}</div></div>`).join('') || '<div class="row">(无匹配)</div>';
+    `<div class="row" title="${esc(m.target)}${m.serviceId ? '\n服务: ' + esc(m.serviceId) : ''}">${lamp(m.lamp || 'unknown')}${hl(m.name, f.q)}<small>${m.agents.length} agent</small><div class="mcp-target">${esc(m.target)}</div></div>`).join('') || '<div class="row">(无匹配)</div>';
   setCount('c-mcp', s.mcp.length, mcps.length);
 
   // —— 用量 ——

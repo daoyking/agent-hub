@@ -15,6 +15,19 @@ func state(_ lamps: [String]) -> Data {
     return Data("{\"services\":[\(svcs)]}".utf8)
 }
 
+/// 构造只有 engines 段的 /api/state
+func engines(_ lamps: [String]) -> Data {
+    let arr = lamps.map { "{\"lamp\":\"\($0)\"}" }.joined(separator: ",")
+    return Data("{\"engines\":[\(arr)]}".utf8)
+}
+
+/// 构造 engines + services 两段都有数据的 /api/state
+func both(_ e: [String], _ s: [String]) -> Data {
+    let ea = e.map { "{\"lamp\":\"\($0)\"}" }.joined(separator: ",")
+    let sa = s.map { "{\"lamp\":\"\($0)\"}" }.joined(separator: ",")
+    return Data("{\"engines\":[\(ea)],\"services\":[\(sa)]}".utf8)
+}
+
 @main
 struct LampTest {
     static func main() {
@@ -34,6 +47,12 @@ struct LampTest {
         check("grey+idle 混 amber 仍取 amber", worstLamp(fromStateJSON: state(["grey", "idle", "amber"])), "amber", &failed)
         check("全 idle 不报警", worstLamp(fromStateJSON: state(["idle", "idle"])), "green", &failed)
         check("空服务列表", worstLamp(fromStateJSON: state([])), "green", &failed)
+        // 引擎也要参与聚合：之前只看 services，「所有引擎都坏了但托盘还绿着」
+        check("引擎全红 → 红", worstLamp(fromStateJSON: engines(["red", "red"])), "red", &failed)
+        check("引擎红 + 服务绿 → 红", worstLamp(fromStateJSON: both(["green", "green"], ["red"])), "red", &failed)
+        check("引擎 grey 不压低服务绿", worstLamp(fromStateJSON: both(["grey", "green"], ["green"])), "green", &failed)
+        check("引擎 unknown 不压低", worstLamp(fromStateJSON: both(["unknown", "green"], ["green"])), "green", &failed)
+        check("服务 amber + 引擎绿 → 黄", worstLamp(fromStateJSON: both(["green"], ["amber"])), "amber", &failed)
         check("坏 JSON", worstLamp(fromStateJSON: Data("not json".utf8)), "green", &failed)
         check("缺 services 字段", worstLamp(fromStateJSON: Data("{\"engines\":[]}".utf8)), "green", &failed)
         print(failed == 0 ? "\n全部通过" : "\n\(failed) 项失败")

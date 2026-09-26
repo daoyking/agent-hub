@@ -134,5 +134,17 @@ check('red 优先于 idle', aggregateLamp([H('idle'), H('red')]).lamp, 'red');
 check('全 idle → unknown（无可判定）', aggregateLamp([H('idle')]).lamp, 'unknown');
 check('空 → unknown', aggregateLamp([]).lamp, 'unknown');
 
+// —— MCP 灯色：死端口必须是红，不能兜底成绿 ——
+const { scanMcp } = await import('../src/mcphub.ts');
+console.log('\n=== MCP 灯色（死端口不兜底成绿）===');
+const svcs = (ports) => ports.map((p) => ({ id: `s${p}`, label: `s${p}`, managed: 'unmanaged', ports: [p], health: { lamp: 'green', l1: 'up', l2: 'ok', l3: 'skipped', detail: '', at: Date.now() } }));
+const mcpEntries = await scanMcp(svcs([8080]));
+const byName = Object.fromEntries(mcpEntries.map((m) => [m.name, m]));
+// 本机实测：http MCP 指向 :9010（已无人监听），三个是 stdio
+check('http 指向死端口 → red', byName['browseros-neo']?.lamp, 'red');
+check('stdio → unknown（不假装健康）', byName['zai-mcp-server']?.lamp, 'unknown');
+check('stdio computer-use → unknown', byName['computer-use']?.lamp, 'unknown');
+check('stdio node_repl → unknown', byName['node_repl']?.lamp, 'unknown');
+
 console.log(failed === 0 ? '\n全部通过' : `\n${failed} 项失败`);
 process.exit(failed === 0 ? 0 : 1);

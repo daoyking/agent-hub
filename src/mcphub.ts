@@ -26,6 +26,11 @@ export type McpEntry = {
   serviceId?: string;
   /** 关联服务的可用性（down 时该 MCP 必然不可用） */
   serviceLamp?: string;
+  /**
+   * 灯色：green/red 跟随本地服务；http 指向死端口 ⇒ red；stdio ⇒ unknown
+   * （无法从配置判断存活，**不要**因为"不是服务"就标绿）。
+   */
+  lamp?: 'green' | 'amber' | 'red' | 'grey' | 'idle' | 'unknown';
   raw: Record<string, unknown>;
 };
 
@@ -149,24 +154,46 @@ export async function scanMcp(services: LocalService[] = []): Promise<McpEntry[]
     }
   }
 
-  // 与本地服务关联：URL 端口 → 服务；服务红灯 ⇒ 这个 MCP 必然不可用
+  // 灯色 + 与本地服务关联（URL 端口 → 服务）
   const out = [...byTarget.values()];
   for (const e of out) {
+    e.lamp = mcpLampOf(e, services);
+    if (e.serviceLamp) continue;
     if (!/^https?:/.test(e.target)) continue;
-    let port: number | undefined;
-    try {
-      const u = new URL(e.target);
-      port = u.port ? Number(u.port) : u.protocol === 'https:' ? 443 : 80;
-    } catch {
-      continue;
-    }
-    const svc = services.find((s) => s.ports.includes(port!));
+    const svc = serviceFor(e.target, services);
     if (svc) {
       e.serviceId = svc.id;
       e.serviceLamp = svc.health?.lamp;
     }
   }
   return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** 从 http(s) target 里解出端口，再找本机监听该端口的服务 */
+function serviceFor(target: string, services: LocalService[]): LocalService | undefined {
+  let port: number;
+  try {
+    const u = new URL(target);
+    port = u.port ? Number(u.port) : u.protocol === 'https:' ? 443 : 80;
+  } catch {
+    return undefined;
+  }
+  return services.find((s) => s.ports.includes(port));
+}
+
+/**
+ * MCP 灯色。
+ *
+ * - http：跟着它指向的本地服务；**该端口没人监听 ⇒ red**。之前这里留空、
+ *   UI 兜底成绿色，等于"指向死端口的 MCP 显示可用"（实测 browseros-neo
+ *   :9010 早已无人监听，灯却是绿的）。
+ * - stdio（本地起子进程，如 `npx -y @z_ai/mcp-server`）：无法从配置判断存活——
+ *   面板轮询里不真连（会重复起进程），标 unknown。**不因为"不是服务"就当健康**。
+ */
+function mcpLampOf(e: McpEntry, services: LocalService[]): McpEntry['lamp'] {
+  if (!/^https?:/.test(e.target)) return 'unknown';
+  const svc = serviceFor(e.target, services);
+  return svc?.health?.lamp ?? 'red';
 }
 
 /** 转成 ACP `session/new` 的 mcpServers —— 一份配置喂所有引擎 */

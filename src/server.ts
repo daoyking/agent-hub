@@ -66,6 +66,8 @@ export type ServerState = {
     agents: string[];
     serviceId?: string;
     serviceLamp?: string;
+  /** MCP 灯色（见 mcphub.mcpLampOf：跟随服务 / 死端口 red / stdio unknown） */
+  lamp?: string;
   }>;
   at: number;
 };
@@ -174,6 +176,7 @@ async function gatherState(): Promise<ServerState> {
     agents: e.agents,
     serviceId: e.serviceId,
     serviceLamp: e.serviceLamp,
+    lamp: e.lamp,
   }));
   return {
     engines: loadEngines().map((e) => ({

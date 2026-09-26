@@ -8,16 +8,20 @@ import Foundation
 
 /// 解析 /api/state 的 JSON，返回最差灯色："red" | "amber" | "green"
 func worstLamp(fromStateJSON data: Data) -> String {
-    guard let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-          let services = j["services"] as? [[String: Any]] else {
+    guard let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
         return "green" // 拿不到状态不吓人（面板自己会显示连接失败）
     }
     var worst = "green"
-    for s in services {
-        switch s["lamp"] as? String ?? "unknown" {
-        case "red": return "red" // 已经最差，无需继续
-        case "amber": worst = "amber"
-        default: break // green / unknown：不压低
+
+    // 引擎 + 服务一起看：引擎挂了一个，面板里选它就会失败，托盘该知情。
+    // 之前只聚合 services，导致「所有引擎都坏了但托盘还绿着」。
+    for key in ["engines", "services"] {
+        for item in (j[key] as? [[String: Any]] ?? []) {
+            switch item["lamp"] as? String ?? "unknown" {
+            case "red": return "red" // 已经最差，无需继续
+            case "amber": worst = "amber"
+            default: break // green / grey / idle / unknown：不压低
+            }
         }
     }
     return worst
