@@ -49,6 +49,11 @@ export type LocalService = {
   ownerMatched?: boolean;
   logPath?: string;
   mcp?: { url?: string; stdio?: string; name: string };
+  /** launchd 调度特征：只有 KeepAlive 才有"本该常驻"的资格，其余按需/定时 */
+  keepAlive?: boolean;
+  runAtLoad?: boolean;
+  /** StartInterval（秒）——有值说明是定时任务，不在跑属正常 */
+  startIntervalSec?: number;
   l2?: { path: string; expect?: string; expectStatus?: number };
   l3?: { url?: string; expect?: string; timeoutMs?: number };
   notes?: string;
@@ -67,7 +72,7 @@ const L2_HINTS: Record<number, { path: string; expect?: string }> = {
 };
 
 export type Discovery = {
-  plists: Array<{ label: string; args: string[]; logPath?: string; errPath?: string; runAtLoad: boolean; keepAlive: boolean; loaded: boolean }>;
+  plists: Array<{ label: string; args: string[]; logPath?: string; errPath?: string; runAtLoad: boolean; keepAlive: boolean; startInterval?: number; loaded: boolean }>;
   listeners: Array<{ pid: number; name: string; ports: number[]; cmdline: string }>;
 };
 
@@ -266,6 +271,7 @@ async function plists(): Promise<Discovery['plists']> {
         errPath: d.StandardErrorPath as string | undefined,
         runAtLoad: Boolean(d.RunAtLoad),
         keepAlive: Boolean(d.KeepAlive),
+        startInterval: typeof d.StartInterval === 'number' ? d.StartInterval : undefined,
         loaded: await launchdState(label),
       });
     } catch {
@@ -276,12 +282,23 @@ async function plists(): Promise<Discovery['plists']> {
 }
 
 /** 读 launchd 状态是允许的；写（bootstrap）在 agent 侧会因不在 Aqua 会话而失败（技能 §2） */
+/**
+ * 该 launchd label 是否**已注册**到当前用户的 gui 域。
+ *
+ * 踩过的坑：早先这里判断的是 `state = running`，即"当前进程是否在跑"，
+ * 把「已注册但空闲」误判成「未注册」。后果是 `managed` 变成 plist-only，
+ * 于是 lamp 判成 ⚫ 已停止——**掩盖真故障**：实测 v2ray-core（KeepAlive=false）
+ * 注册着但进程不在 = 代理其实挂了，却显示成"你自己停的"。
+ *
+ * 现在以 `launchctl print` **是否成功**为准（能 print 出 path = 就已注册），
+ * 运行与否交给健康探针去判——两件事分开。
+ */
 export async function launchdState(label: string): Promise<boolean> {
   try {
-    const { stdout } = await exec('launchctl', ['print', `gui/${UID}/${label}`], { maxBuffer: 4 * 1024 * 1024 });
-    return /state = running|job state = running/.test(stdout);
+    await exec('launchctl', ['print', `gui/${UID}/${label}`], { maxBuffer: 4 * 1024 * 1024 });
+    return true; // 能 print 出来 = 已注册（不管此刻在不在跑）
   } catch {
-    return false;
+    return false; // "Could not find service" = 压根没注册
   }
 }
 
@@ -398,21 +415,60 @@ export async function probeAll(list: LocalService[]): Promise<LocalService[]> {
   return Promise.all(list.map(async (s) => ({ ...s, health: await probeService(s, probeLevelFor(s)) })));
 }
 
+/**
+ * 「已注册但进程不在」到底算不算故障——看 launchd 的**调度意图**。
+ *
+ * 实测（本机 5 个）：只有 KeepAlive=true 才意味着"本该常驻却没在跑"= 真故障。
+ * 其余都是正常空闲：
+ *   - StartInterval=3600/21600（GoogleUpdater / CleanMyMac Updater）→ 定时唤醒
+ *   - RunAtLoad=false（hermes maintenance）→ 按需跑
+ *   - 两者皆无（v2ray-core，KeepAlive=false）→ 用户想用时才起
+ * 不区分就报红，等于**每台机器常驻 4 个假故障**——狼来了，灯就不敢信了。
+ *
+ * 返回 grey（非故障，detail 里说明为什么）或 red（真故障）。
+ */
+function notRunningVerdict(svc: LocalService): { lamp: 'grey' | 'red'; detail: string } {
+  const unregistered = svc.managed === 'plist-only';
+  if (unregistered) {
+    return { lamp: 'grey', detail: 'plist 存在但未 launchctl load（已停止）' };
+  }
+  if (svc.keepAlive) {
+    return { lamp: 'red', detail: 'KeepAlive=true 应当常驻，进程却不在（真故障）' };
+  }
+  if (svc.startIntervalSec) {
+    const h = Math.round(svc.startIntervalSec / 360) / 10;
+    return { lamp: 'grey', detail: `定时任务（每 ${h}h 唤醒），当前不在属正常` };
+  }
+  if (!svc.runAtLoad) {
+    return { lamp: 'grey', detail: '按需运行（无 RunAtLoad/KeepAlive），不在属正常' };
+  }
+  return { lamp: 'grey', detail: 'RunAtLoad 启动后已退出（可能脚本跑完），非故障' };
+}
+
 export async function probeService(svc: LocalService, level: ProbeLevel): Promise<Health> {
   const at = Date.now();
   const port = svc.ports[0];
   const h: Health = { l1: 'unknown', l2: 'skipped', l3: 'skipped', lamp: 'unknown', detail: '', at };
 
   if (port === undefined) {
-    // 无端口服务：有 expectCmdline 就退化为进程存活探针（绿=活着，红=死了）
+    // 无端口服务：有 expectCmdline 就退化为进程存活探针。
+    // 与有端口分支**同一套判据**（之前这里漏了 grey，导致 plist-only 的守护型
+    // 服务进程不在时一律报红，与"已停止"的语义打架）：
+    //   进程在 → 🟢；进程不在 + plist-only（launchd 没加载）→ ⚫ 已停止；
+    //   进程不在 + launchd（加载了却没进程）→ 🔴 真故障。
     if (svc.expectCmdline) {
       const alive = await processAlive(svc.expectCmdline);
       if (alive !== undefined) {
-        h.l1 = alive ? 'up' : 'down';
-        h.lamp = alive ? 'green' : 'red';
-        h.detail = alive
-          ? `进程存活（/${svc.expectCmdline}/ 匹配）· 无端口，无 L2 可探`
-          : `进程不在（/${svc.expectCmdline}/ 无匹配）`;
+        if (alive) {
+          h.l1 = 'up';
+          h.lamp = 'green';
+          h.detail = `进程存活（/${svc.expectCmdline}/ 匹配）· 无端口，无 L2 可探`;
+        } else {
+          const v = notRunningVerdict(svc);
+          h.l1 = v.lamp === 'red' ? 'down' : 'stopped';
+          h.lamp = v.lamp;
+          h.detail = v.lamp === 'red' ? v.detail : `${v.detail}；/（${svc.expectCmdline}）无匹配`;
+        }
         return h;
       }
     }
@@ -435,12 +491,10 @@ export async function probeService(svc: LocalService, level: ProbeLevel): Promis
     //    （比如换机器、主动 unload、或这个服务你已经不用了）→ grey 已停止
     //  - launchd：加载了却不监听 → 真的坏了/崩了 → red
     //  - unmanaged：没有 plist 可依据，无从判断是"停"还是"崩" → 保持 red
-    const stopped = svc.managed === 'plist-only';
-    h.l1 = stopped ? 'stopped' : 'down';
-    h.lamp = stopped ? 'grey' : 'red';
-    h.detail = stopped
-      ? `L1 ${port} 未监听 · plist 存在但未 launchctl load（已停止）`
-      : `L1 ${port} 未监听`;
+    const v = notRunningVerdict(svc);
+    h.l1 = v.lamp === 'red' ? 'down' : 'stopped';
+    h.lamp = v.lamp;
+    h.detail = `L1 ${port} 未监听 · ${v.detail}`;
     return h;
   }
 
@@ -519,6 +573,9 @@ export async function discover(): Promise<LocalService[]> {
       label: p.label,
       managed: p.loaded ? 'launchd' : 'plist-only',
       plist: path.join(LAUNCH_AGENTS, `${p.label}.plist`),
+      keepAlive: p.keepAlive || undefined,
+      runAtLoad: p.runAtLoad || undefined,
+      startIntervalSec: p.startInterval,
       pid: hit?.pid,
       ports: hit?.ports ?? [],
       cmdline: hit?.cmdline,

@@ -205,5 +205,20 @@ check('声明了 l2 → l2', probeLevelFor(mk([8080], { path: '/health' })), 'l2
 check('没声明 l2 → l1（保持绿，不变 unknown）', probeLevelFor(mk([9999])), 'l1');
 check('无端口 → l1（走进程存活探针）', probeLevelFor(mk([])), 'l1');
 
+// —— 「已注册但没在跑」算不算故障：只看 launchd 的调度意图 ——
+// 不区分就会常驻 4 个假故障（狼来了，灯就不敢信）。
+const { probeService } = await import('../src/services.ts');
+const svc = (o) => ({ id: 't', label: 't', managed: 'launchd', ports: [], expectCmdline: '/nope-xyz', ...o });
+const lampOf = async (o) => (await probeService(svc(o), 'l1')).lamp;
+console.log('\n=== 未在跑 ≠ 故障（看调度意图）===');
+check('★ KeepAlive 却没在跑 → 红（真故障）', await lampOf({ keepAlive: true }), 'red');
+check('KeepAlive 优先于 StartInterval', await lampOf({ keepAlive: true, startIntervalSec: 3600 }), 'red');
+check('定时任务不在 → 灰（正常）', await lampOf({ startIntervalSec: 3600 }), 'grey');
+check('按需运行不在 → 灰', await lampOf({ runAtLoad: false }), 'grey');
+check('RunAtLoad 启动后退了 → 灰', await lampOf({ runAtLoad: true }), 'grey');
+check('未注册（plist-only）→ 灰（已停止）', await lampOf({ managed: 'plist-only' }), 'grey');
+check('★ 定时任务的 detail 要说明间隔', (await probeService(svc({ startIntervalSec: 7200 }), 'l1')).detail.includes('2h'), true);
+check('★ 灰灯不能只说"进程不在"（要说清为什么）', (await probeService(svc({ startIntervalSec: 60 }), 'l1')).detail.length > 12, true);
+
 console.log(failed === 0 ? '\n全部通过' : `\n${failed} 项失败`);
 process.exit(failed === 0 ? 0 : 1);

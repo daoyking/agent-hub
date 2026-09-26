@@ -109,7 +109,15 @@ setTimeout(() => {
 }, 30000).unref?.();
 
 bridgeSse().catch((e) => console.log('SSE 桥接结束:', e.message));
-await new Promise((r) => setTimeout(r, 800)); // 让页面 refresh() 落地 + SSE 连上
+// 等侧栏真的渲染出来，而不是固定 sleep —— /api/state 本身要 ~1s（45 个服务
+// 分档探测），固定 800ms 这种写法迟早会被更慢但同样正确的实现搞挂。
+{
+  const t0 = Date.now();
+  while (!document.getElementById('c-svc-ok')?.textContent) {
+    if (Date.now() - t0 > 15000) break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
 
 console.log('=== 面板初始状态 ===');
 console.log('引擎下拉:', [...document.querySelectorAll('#engine option')].map((o) => o.value).join(', '));
