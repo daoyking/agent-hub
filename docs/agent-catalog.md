@@ -76,3 +76,29 @@
 strings $(command -v <tool>) | grep -c agent-client-protocol
 # 装好后直接加 engines.json 跑 agentbd doctor，握手结果就是结论
 ```
+
+### 安装 qwen-code 时的 npm 警告（**不用管**）
+
+```
+npm warn install-scripts Run `npm install -g --allow-scripts=@qwen-code/audio-capture`
+  to allow these scripts once, …
+```
+
+**这是良性的，别改全局 npm 配置。** 三条实测依据：
+
+1. **预编译产物本来就在包里**——`@qwen-code/audio-capture@0.24.6` 自带
+   `prebuilds/darwin-arm64`（688K）。`install.js` 跑的 `node-gyp-build` 只是
+   **定位**这个已存在的二进制，不是编译它。脚本跳过 = 少跑一次定位而已。
+2. **上游明确设计成非致命**——install.js 注释原文：
+   *"A failed or impossible build is intentionally NON-FATAL: voice input falls
+   back to the SoX/arecord recorder, so installing the CLI must never break for
+   this optional capability"*。失败路径只打印一行
+   `voice input will fall back to SoX/arecord`。
+3. **只影响语音输入**——麦克风原生后端，与 agentbd 的用法（ACP 驱动做编程任务）
+   无关。qwen 握手正常、能力完整（loadSession/resume/list，auth: openai）。
+
+真要用语音输入且 SoX/arecord 也不可用时，再单独装：
+`npm i -g --allow-scripts=@qwen-code/audio-capture`
+
+> 本机 npm 已配 `allow-scripts=context-mode,better-sqlite3`（白名单制）。
+> 那是**有意的安全策略**——不要为了消掉一条警告就把它全局放开。
