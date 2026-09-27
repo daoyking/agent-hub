@@ -28,22 +28,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSUIElement</key><true/>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
-  <key>CFBundleIconFile</key><string>menubar</string>
 </dict>
 </plist>
 PLIST
-
-# 菜单栏图标：SVG → template PNG（@1x 18pt / @2x 36pt）
-# 必须是 template image（单色 + 透明底），macOS 才会按菜单栏深浅色自动反相。
-mkdir -p "$APP/Contents/Resources"
-ICON_DIR="$SRC_DIR/icons"
-mkdir -p "$ICON_DIR"
-if [ ! -f "$ICON_DIR/menubar.png" ] || [ "$SRC_DIR/agentbd-menubar.svg" -nt "$ICON_DIR/menubar.png" ]; then
-  qlmanage -t -s 18 -o "$ICON_DIR" "$SRC_DIR/agentbd-menubar.svg" >/dev/null 2>&1
-  mv -f "$ICON_DIR/agentbd-menubar.svg.png" "$ICON_DIR/menubar.png"
-  qlmanage -t -s 36 -o "$ICON_DIR" "$SRC_DIR/agentbd-menubar.svg" >/dev/null 2>&1
-  mv -f "$ICON_DIR/agentbd-menubar.svg.png" "$ICON_DIR/menubar@2x.png"
-fi
-cp "$ICON_DIR/menubar.png" "$ICON_DIR/menubar@2x.png" "$APP/Contents/Resources/"
 
 echo "OK: $APP"
