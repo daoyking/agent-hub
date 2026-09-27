@@ -21,9 +21,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type * as acp from '@agentclientprotocol/sdk';
 import { BUILTIN_ENGINES, loadEngines, findEngine } from './registry.ts';
+import type { EngineSpec } from './registry.ts';
 import { runTurn } from './bus.ts';
 import { probe, probeAllEngines } from './doctor.ts';
-import { loadEngineDeep } from './engineDeep.ts';
+import { loadEngineDeep, saveEngineDeep } from './engineDeep.ts';
 import { discover, probeService, probeAll, loadManifest } from './services.ts';
 import { scanMcp, toAcpMcpServers } from './mcphub.ts';
 import { resolveResume, aggregateStats } from './sessions.ts';
@@ -140,6 +141,52 @@ function broadcast(payload: Record<string, unknown>): void {
       sseClients.delete(res);
     }
   }
+}
+
+/**
+ * 跑一次「回合可用性」检查并落盘（`doctor --deep` 的网页版）。
+ *
+ * 判定与 CLI 一致：stopReason === 'cancelled' 算**不通过**（回合是被中止的，
+ * 多半是超时），不等于"引擎能用"。结果进 engine-deep.json，面板下一次轮询
+ * 就会把该引擎显示成 🟡（握手 OK 但回合不通）。
+ */
+async function runEngineDeep(spec: EngineSpec): Promise<void> {
+  const started = Date.now();
+  broadcast({ k: 'engine.deep', engine: spec.id, state: 'running' });
+  let entry: { id: string; ok: boolean; detail: string };
+  try {
+    const r = await runTurn({
+      spec,
+      cwd: process.cwd(),
+      prompt: '回复 OK 两个字符即可',
+      approval: 'deny', // 不给任何工具权限，纯测模型通路
+      budget: 'off',
+      persist: false,
+      timeoutMs: 90_000,
+    });
+    const ok = r.stopReason !== 'cancelled';
+    entry = {
+      id: spec.id,
+      ok,
+      detail: ok
+        ? `${r.stopReason} · ${r.durationMs}ms${r.text?.trim() ? ` · 回复 "${r.text.trim().slice(0, 20)}"` : ''}`
+        : `${r.stopReason}（回合被中止，多半是超时）· ${r.durationMs}ms`,
+    };
+  } catch (err) {
+    entry = { id: spec.id, ok: false, detail: (err instanceof Error ? err.message : String(err)).split('\n')[0]! };
+  }
+  // 合并进已有结果（只测一个引擎不该抹掉其它引擎的结论）
+  const prev = await loadEngineDeep();
+  const all = new Map(prev);
+  all.set(spec.id, { ...entry, at: Date.now() });
+  await saveEngineDeep([...all.values()].map(({ id, ok, detail }) => ({ id, ok, detail })));
+  broadcast({
+    k: 'engine.deep',
+    engine: spec.id,
+    state: entry.ok ? 'ok' : 'fail',
+    detail: entry.detail,
+    ms: Date.now() - started,
+  });
 }
 
 async function gatherState(): Promise<ServerState> {
@@ -439,6 +486,18 @@ export async function startServer(opts: {
           });
         } else if (req.method === 'GET' && url.pathname === '/api/stats') {
           json(res, 200, { ...(await aggregateStats()), budget: await checkBudget({ skipTeam: true }) });
+        } else if (req.method === 'POST' && url.pathname === '/api/engine-deep') {
+          // 面板上直接跑「回合可用性」检查（doctor --deep 的网页版）。
+          // 异步执行、立即返回：要真跑一个回合（可能 90s+），同步会卡住 SSE。
+          const body = await readBody(req);
+          const id = String(body.engine ?? '');
+          const spec = findEngine(id);
+          if (!spec) {
+            json(res, 404, { error: `未知引擎: ${id}` });
+            return;
+          }
+          json(res, 202, { accepted: true, engine: id });
+          void runEngineDeep(spec);
         } else if (req.method === 'POST' && url.pathname === '/api/refresh') {
           const state = await gatherState();
           json(res, 200, state);

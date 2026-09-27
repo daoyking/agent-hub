@@ -22,6 +22,9 @@
   .row:hover { background:var(--panel); }
   .row small { color:var(--dim); margin-left:auto; font-size:11px; }
   em.undecl { font-style:normal; font-size:10px; color:#d29922; border:1px solid #3a3020; border-radius:4px; padding:0 4px; margin-right:6px; }
+  .deep-btn { flex:none; font-size:10px; padding:1px 6px; color:var(--dim); }
+  .deep-btn:hover:not(:disabled) { color:var(--fg); border-color:#3d4454; }
+  .deep-btn:disabled { opacity:.5; cursor:default; }
   em.stopped { font-style:normal; font-size:10px; color:var(--dim); border:1px solid var(--line); border-radius:4px; padding:0 4px; margin-right:6px; }
   em.stopped { font-style:normal; font-size:10px; color:var(--dim); border:1px solid var(--line); border-radius:4px; padding:0 4px; margin-right:6px; }
   .mcp-target { color:var(--dim); font-size:11px; word-break:break-all; }
@@ -140,6 +143,30 @@ function log(cls, text) {
 }
 let lastState = null; // 筛选变化时本地重渲染，不必重新 fetch
 let lastStats = null;
+/** 触发一次回合可用性检查（后端异步跑，这里只负责点按钮 + 轮询等结果） */
+async function deepCheck(id, btn) {
+  btn.disabled = true; btn.textContent = '…';
+  try {
+    await fetch('/api/engine-deep', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ engine: id }),
+    });
+  } catch { /* 后端不可达，下面统一显示失败 */ }
+  // 最长等 120s（后端 timeout 90s + 余量）；期间靠轮询拿结论
+  const t0 = Date.now();
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 3000));
+    if (Date.now() - t0 > 120000) { btn.disabled = false; btn.textContent = '超时'; return; }
+    const s = await (await fetch('/api/state')).json();
+    const e = s.engines.find((x) => x.id === id);
+    if (e && e.lamp === 'amber') { btn.disabled = false; btn.textContent = '测'; return; }  // 回合不通
+    if (e && e.lamp === 'green' && /回合 ✓/.test(e.engineDetail || '')) {
+      btn.disabled = false; btn.textContent = '测'; return;                                                                 // 回合通过
+    }
+  }
+}
+
 async function refresh() {
   try {
     const s = await (await fetch('/api/state')).json();
@@ -166,7 +193,12 @@ function renderSide() {
   const engines = s.engines.filter((e) => hit(`${e.id} ${e.label} ${e.vendor}`, f));
   $('engines').innerHTML = engines.map((e) =>
     `<div class="row" title="${esc(e.engineDetail || e.label)} · ${e.channel}">` +
-    `${lamp(e.lamp)}${hl(e.id, f.q)}<small>${hl(e.engineDetail || e.vendor, f.q)}</small></div>`).join('') || '<div class="row">(无匹配)</div>';
+    `${lamp(e.lamp)}${hl(e.id, f.q)}<small>${hl(e.engineDetail || e.vendor, f.q)}</small>` +
+    `<button class="deep-btn" data-engine="${esc(e.id)}" title="真跑一个回合，检查能不能用（会调用模型）">测</button>` +
+    `</div>`).join('') || '<div class="row">(无匹配)</div>';
+  for (const b of $('engines').querySelectorAll('.deep-btn')) {
+    b.onclick = (ev) => { ev.stopPropagation(); deepCheck(b.dataset.engine, b); };
+  }
   setCount('c-engines', s.engines.length, engines.length);
 
   // —— 本地服务：已登记 / 现场发现分组（44 条平铺太长）——

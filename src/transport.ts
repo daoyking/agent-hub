@@ -191,12 +191,28 @@ async function launchService(spec: EngineSpec, opts: { cwd?: string } = {}): Pro
         resolve(buf.slice(idx + prefix.length).trim().split(/\s+/)[0] ?? null);
       }
     };
+    // 失败路径**必须杀掉已 spawn 的子进程**。否则它会变成孤儿进程永久占着
+    // 一个端口：调用方（doctor.probe / runTurn）拿到的是 launch() 的异常，
+    // `agent` 变量从未赋值，dispose() 也就永远不会执行 → 进程泄漏。
+    // 实测本机因此积了 12 个 agnesd 僵尸（面板上表现为 12 条同名服务）。
+    const killNow = () => {
+      try {
+        child.kill('SIGTERM');
+      } catch {}
+      const t = setTimeout(() => {
+        try {
+          child.kill('SIGKILL');
+        } catch {}
+      }, 2000);
+      t.unref?.();
+    };
     const onExit = (code: number | null) => {
       cleanup();
       reject(new Error(`agnesd 启动即退出（exit=${code}）`));
     };
     const timer = setTimeout(() => {
       cleanup();
+      killNow();
       reject(new Error('等不到 GOOSED_CERT_FINGERPRINT（服务没起来？）'));
     }, 15000);
     function cleanup() {
@@ -230,7 +246,10 @@ async function launchService(spec: EngineSpec, opts: { cwd?: string } = {}): Pro
   }
 
   // ③ WebSocket 连接 + 指纹 pin（自签证书用 rejectUnauthorized:false，安全性靠指纹比对）
-  const ws = await new Promise<WebSocket>((resolve, reject) => {
+  // 同样兜底：ws 的每个 reject 分支（超时/指纹不符/连接错误）原本都不杀进程。
+  let ws: WebSocket;
+  try {
+    ws = await new Promise<WebSocket>((resolve, reject) => {
     const sock = new WebSocket(`${info.url}?token=${token}`, {
       rejectUnauthorized: false,
       handshakeTimeout: 10000,
@@ -254,7 +273,20 @@ async function launchService(spec: EngineSpec, opts: { cwd?: string } = {}): Pro
       clearTimeout(timer);
       reject(e instanceof Error ? e : new Error(String(e)));
     });
-  });
+    });
+  } catch (err) {
+    // ws 没建起来 = 这次 spawn 白费了，必须收尸，否则又是一个孤儿进程
+    try {
+      child.kill('SIGTERM');
+    } catch {}
+    const t = setTimeout(() => {
+      try {
+        child.kill('SIGKILL');
+      } catch {}
+    }, 2000);
+    t.unref?.();
+    throw err;
+  }
 
   // ④ WS frame ↔ ndjson 双向桥（bus/doctor 只认 acp.Stream）
   const inbound = new Readable({ read() {} });
