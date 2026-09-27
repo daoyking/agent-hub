@@ -338,7 +338,16 @@ $ agentbd serve uninstall  # 一键还原
 | `npm run failover-test` | 软失败检测、失败分类、退避档位、模型降级链、耗尽提示 | ❌ |
 | `npm run ui-verify` | 面板 DOM 断言 17 项（真实 ui.html + jsdom + 真实 SSE） | ⚠️ 需先起 `serve` |
 | `npm run lamp-test` | 托盘灯色判定 8 项（Swift 联合编译） | ❌ |
-| `node src/cli.ts doctor` | 6 引擎握手 + 能力探测 | ✅ 需本机已登录 |
+| `node src/cli.ts doctor` | 11 引擎握手 + 能力探测 | ✅ 需本机已登录 |
+| `node src/cli.ts doctor --deep` | 上面 + **真实跑一个回合**（区分"能连上"和"能用"）| ✅ 会产生模型调用费用 |
+
+**为什么需要 `--deep`**：ACP 握手只验证**协议**，不验证凭证/配额/模型。实测 qwen
+握手 ✔ PASS 但真实回合报 `Use Qwen Code CLI to authenticate first`——doctor 说
+可用、面板亮绿灯、`ask` 直接失败。`--deep` 真跑一个极小回合（`approval: deny`
++ `budget: off` + 不落 transcript）把这层区分开。`stopReason === 'cancelled'`
+判为**不通过**（回合是被中止的，多半超时），不算"引擎能用"。不用厂商特定的
+认证查询命令，是因为各家差异太大且常是交互式的（omp 的 `auth status` 是 TUI），
+直接跑一个回合更可靠。
 
 `failover-test` 的样例**全部取自实测日志**（`~/.agnes/state/logs/server/**-agnesd.log`），
 重点锁住「软失败」——agnesd 把上游错误写进正文再 `end_turn`，不特判就会把失败回合

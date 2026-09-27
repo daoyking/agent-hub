@@ -67,6 +67,8 @@ type Flags = {
   timeoutMs: number;
   quiet: boolean;
   probeLevel: ProbeLevel;
+  /** doctor --deep：握手之外真跑一个回合（会调用模型） */
+  deep: boolean;
   withMcp: boolean;
   all: boolean;
   agents: string[];
@@ -93,6 +95,7 @@ function parseArgs(argv: string[]): Flags {
     timeoutMs: 300000,
     quiet: false,
     probeLevel: 'l2',
+    deep: false,
     withMcp: false,
     all: false,
     agents: [],
@@ -112,6 +115,7 @@ function parseArgs(argv: string[]): Flags {
     else if (a === '--deny') flags.approval = 'deny';
     else if (a === '--guard') flags.approval = 'guard';
     else if (a === '--timeout') flags.timeoutMs = Number(argv[++i]!) * 1000;
+    else if (a === '--deep') flags.deep = true;
     else if (a === '--l1') flags.probeLevel = 'l1';
     else if (a === '--l2') flags.probeLevel = 'l2';
     else if (a === '--l3') flags.probeLevel = 'l3';
@@ -234,6 +238,46 @@ async function cmdDoctor(targets: string[], flags: Flags): Promise<void> {
       : loadEngines();
 
   const results = await Promise.all(specs.map((s) => probe(s, flags.cwd)));
+
+  // --deep：握手通过 ≠ 真能用。实测 qwen 握手 PASS 但真实回合报
+  // "Use Qwen Code CLI to authenticate first" —— 没登录/没配额/没模型时，
+  // ACP 握手照样成功（它只验证协议，不验证凭证）。这里真跑一个极小回合，
+  // 把「能连上」和「能用」区分开。代价 = 每个引擎一次模型调用，故默认不开。
+  const deep = flags.deep;
+  if (deep) {
+    console.log('\x1b[2m(--deep：逐个引擎跑一个真实回合，会产生模型调用费用)\x1b[0m');
+  }
+  const deepResults = deep
+    ? await Promise.all(
+        specs.map(async (s) => {
+          try {
+            const r = await runTurn({
+              spec: s,
+              cwd: flags.cwd,
+              prompt: '回复 OK 两个字符即可',
+              approval: 'deny',
+              budget: 'off',
+              persist: false,
+              timeoutMs: 90_000,
+            });
+            // stopReason 必须区分：'cancelled' 说明回合是被**中止**的（超时/被拒），
+            // 不等于"引擎能用"。只有引擎真的产出了回复（end_turn / refusal /
+            // max_tokens 都是有回复的终止）才算通过。
+            const ok = r.stopReason !== 'cancelled';
+            return {
+              id: s.id,
+              ok,
+              detail: ok
+                ? `${r.stopReason} · ${r.durationMs}ms${r.text?.trim() ? ` · 回复 "${r.text.trim().slice(0, 20)}"` : ''}`
+                : `${r.stopReason}（回合被中止，多半是超时）· ${r.durationMs}ms`,
+            };
+          } catch (err) {
+            return { id: s.id, ok: false, detail: (err instanceof Error ? err.message : String(err)).split('\n')[0]! };
+          }
+        }),
+      )
+    : [];
+
   let bad = 0;
   for (const r of results) {
     const info = r.profile?.agentInfo;
@@ -243,6 +287,15 @@ async function cmdDoctor(targets: string[], flags: Flags): Promise<void> {
       console.log(`         caps: ${shortCapabilities(r.profile.capabilities)}`);
       const auth = r.profile.authMethods.map((m) => m.id).join(', ') || '(none)';
       console.log(`         auth: ${auth}`);
+      const d = deepResults.find((x) => x?.id === r.engine);
+      if (d) {
+        console.log(
+          d.ok
+            ? `         \x1b[32m回合 ✓\x1b[0m ${d.detail}`
+            : `         \x1b[33m回合 ✘\x1b[0m ${d.detail}`,
+        );
+        if (!d.ok) bad++;
+      }
     } else {
       bad++;
       console.log(`         ${(r.error ?? '').split('\n').slice(0, 6).join('\n         ')}`);
