@@ -638,7 +638,14 @@ async function cmdServices(flags: Flags): Promise<void> {
     const mcpTag = s.mcp?.url ? ' [mcp]' : '';
     // 显示 label（人类可读名），不是 pid-xxxxx；未纳管的额外打标
     const name = s.label || s.id;
-    const tag = (declared.has(s.id) ? '' : ' [未登记]') + (h.lamp === 'grey' ? ' [已停止]' : h.lamp === 'idle' ? ' [无从探测]' : '');
+    // grey 有**两种**含义，标签要跟着走：plist 在但没 load = 真「已停止」；
+    // 无调度信息（unmanaged / 定时 / 按需）= 「当前不在」，那不是停止。
+    // 统一标「已停止」会把"没在跑"说成"你把它关了"，实测 Docker/omnigent
+    // 这种 unmanaged 的就被误标了。
+    const greyTag = h.lamp === 'grey'
+      ? (/未 launchctl load/.test(h.detail) ? ' [已停止]' : ' [当前不在]')
+      : '';
+    const tag = (declared.has(s.id) ? '' : ' [未登记]') + greyTag + (h.lamp === 'idle' ? ' [无从探测]' : '');
     console.log(`${LAMP_ICON[h.lamp]} ${(name + tag).padEnd(40)} ${port.padEnd(14)} ${String(s.managed).padEnd(11)}${mcpTag}`);
     console.log(`     ${h.detail}`);
   }

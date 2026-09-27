@@ -209,7 +209,7 @@ function renderSide() {
     return `<div class="row"${faded} title="${esc(x.detail)}${x.declared ? '' : '\n未登记进 services.json（agentbd services init 可纳管）'}">` +
       `${lamp(x.lamp)}${hl(label, f.q)}` +
       `${x.declared ? '' : '<em class="undecl" title="未纳管">未登记</em>'}` +
-      `${x.lamp === 'grey' ? '<em class="stopped" title="plist 存在但未 launchctl load">已停止</em>' : ''}${x.lamp === 'idle' ? '<em class="stopped" title="无端口且未声明 expectCmdline，无法探测存活">无从探测</em>' : ''}` +
+      `${x.lamp === 'grey' ? (/未 launchctl load/.test(x.detail||'') ? '<em class="stopped" title="plist 存在但未 launchctl load">已停止</em>' : '<em class="stopped" title="当前未在运行（定时/按需/无调度信息）——不等于故障">当前不在</em>') : ''}${x.lamp === 'idle' ? '<em class="stopped" title="无端口且未声明 expectCmdline，无法探测存活">无从探测</em>' : ''}` +
       `<small>${esc(x.id.startsWith('pid-') ? '' : x.id)}${x.ports.map(p=>':'+p).join(' ')}</small></div>`;
   };
   const keep = (x) => (!f.onlyUndecl || !x.declared) && hit(`${x.label || x.id} ${x.id} ${x.detail} ${x.ports.join(' ')}`, f);

@@ -203,7 +203,7 @@ export const BUILTIN_ENGINES: EngineSpec[] = [
     // "No auth type is selected"，而在 ACP 下是**静默挂死**（prompt 永不返回）。
     // env 默认指向本地 ollama 的 OpenAI 兼容端点（免费）；要换成云端就
     // 在 ~/.agentbd/engines.json 里覆盖 env（shell 优先级最高）。
-    args: ['--acp', '--auth-type=openai', '-m', 'qwen3:4b'],
+    args: ['--acp', '--auth-type=openai', '-m', 'qwen2.5-coder:14b'],
     channel: 'acp',
     env: {
       OPENAI_API_KEY: 'ollama',
@@ -223,8 +223,8 @@ export const BUILTIN_ENGINES: EngineSpec[] = [
     // 选模型上——而选模型是交互式的，ACP 下表现为 prompt 永不返回。
     // 这里默认指向本地 ollama 的免费模型。
     env: {
-      PI_SMOL_MODEL: 'qwen3:4b',
-      PI_SLOW_MODEL: 'qwen3:4b',
+      PI_SMOL_MODEL: 'qwen2.5-coder:14b',
+      PI_SLOW_MODEL: 'qwen2.5-coder:14b',
     },
     authHint: '默认走本地 ollama 免费模型（需 ollama 在跑）；换模型改 PI_SMOL_MODEL/PI_SLOW_MODEL',
     note: '原生 ACP（`omp acp`，oh-my-pi 18.3.0 实测）；能力最全：含 fork/resume/addDirs',

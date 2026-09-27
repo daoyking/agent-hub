@@ -483,9 +483,21 @@ qwen 会报 `ECONNREFUSED 127.0.0.1:11434`，omp 则一直无输出。
 
 拉起来：`launchctl start com.ollama.ollama`（或打开 Ollama.app）。
 
-### 本地模型的速度现实
+### 本地模型的速度（2026-09-27 实测，非估计）
 
-`qwen3:4b` 跑一句「只回复 OK」实测 **>2 分钟**（含首次加载）。
-本地小模型适合低频、简单任务；密集或复杂任务仍建议切云端引擎
-（claude / codex / deepseek 系）。用 `agentbd doctor --deep` 可以直接
-看出某个引擎"是真能用还是只是能握手"。
+同一句「只回复：你好」，`num_predict=12`：
+
+| 模型 | 冷启动（需加载权重） | 热身后 | 备注 |
+|---|---|---|---|
+| `qwen3:4b` | 56s | **4s** | 通用，对 agentic 编程偏弱 |
+| `qwen2.5-coder:14b` | 91s | **18s** | 编码专用，**已设为 omp/qwen 的默认** |
+| `qwen2.5-coder:7b` | — | — | ⚠️ ollama 里**没有这个模型名**（API 报 not found） |
+
+**关键前提：机器得空。** 上面是热身后的数；同一次测试期间
+`load average` 跑到 **28.95**（Ollama 自己 90% CPU，另有 Marvis 多进程、
+Cline sidecar、WindowServer）。同样条件下冷启动能到 56–91s。
+所以"本地模型很慢"里有一部分是**机器被别的应用占满**，不是模型本身。
+
+**实践建议**：本地模型适合低频、简单任务。密集或复杂编程任务切云端引擎
+（claude / codex / deepseek 系）。用 `agentbd doctor --deep` 可以直接看出
+某个引擎"是真能用还是只是能握手"。

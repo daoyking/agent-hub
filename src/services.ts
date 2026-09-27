@@ -61,13 +61,24 @@ export type LocalService = {
 };
 
 /** 已知服务的探测提示：端口 → L2 路径/期望体（可按实测校准） */
+/**
+ * 端口 → L2 健康路径的默认提示。**每一条都是实测出来的**（对目标端口实际
+ * 发过请求确认 200），不是照抄"常见约定"——很多端口的 `/health` 根本不存在，
+ * 填了只会把好好的服务误判成假活。
+ *
+ * 覆盖不了是正常的：2026-09-25 实测本机 39 个有端口的服务里，只有 6 个
+ * 是 HTTP 服务且能探到健康端点（其余是 gRPC / WebSocket / 仅 TCP 监听 /
+ * 本地 socket，HTTP 探测对它们没有意义）。**L2 不是"补全"任务，是给
+ * 「已经是 HTTP 服务」的那些补一个更确定的判据。** 想加某端口就在这里加一行，
+ * 前提是先 curl 验证过。
+ */
 const L2_HINTS: Record<number, { path: string; expect?: string }> = {
-  11434: { path: '/api/tags', expect: '"models"' },
-  8001: { path: '/health' },
-  18790: { path: '/health' },
-  9010: { path: '/mcp' },
+  11434: { path: '/api/tags', expect: '"models"' },   // ollama（实测）
+  18790: { path: '/health' },                          // openclaw gateway（实测）
+  8080: { path: '/health' },                           // proxy_server（实测）
+  8001: { path: '/health' },                           // litellm gateway（实测，当前已停止）
+  9010: { path: '/mcp' },                              // browseros-neo mcp
   8000: { path: '/api/health' },
-  8080: { path: '/health' },
   3000: { path: '/api/health' },
 };
 
