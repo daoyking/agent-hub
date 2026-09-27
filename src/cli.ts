@@ -16,7 +16,7 @@ import { createInterface } from 'node:readline/promises';
 import type * as acp from '@agentclientprotocol/sdk';
 import { BUILTIN_ENGINES, loadEngines, findEngine, ENGINES_FILE } from './registry.ts';
 import type { EngineSpec } from './registry.ts';
-import { probe } from './doctor.ts';
+import { probe, probeAllEngines } from './doctor.ts';
 import { runTurn } from './bus.ts';
 import type { ApprovalMode } from './policy.ts';
 import type { ApprovalRequest, NormalizedEvent, DiffEntry } from './normalize.ts';
@@ -237,7 +237,7 @@ async function cmdDoctor(targets: string[], flags: Flags): Promise<void> {
       ? targets.map((t) => findEngine(t) ?? ({ id: t, label: t, vendor: 'custom', command: t, args: [], channel: 'acp' } as EngineSpec))
       : loadEngines();
 
-  const results = await Promise.all(specs.map((s) => probe(s, flags.cwd)));
+  const results = await probeAllEngines(specs, (s) => probe(s, flags.cwd));
 
   // --deep：握手通过 ≠ 真能用。实测 qwen 握手 PASS 但真实回合报
   // "Use Qwen Code CLI to authenticate first" —— 没登录/没配额/没模型时，

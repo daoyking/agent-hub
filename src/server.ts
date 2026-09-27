@@ -22,7 +22,7 @@ import { fileURLToPath } from 'node:url';
 import type * as acp from '@agentclientprotocol/sdk';
 import { BUILTIN_ENGINES, loadEngines, findEngine } from './registry.ts';
 import { runTurn } from './bus.ts';
-import { probe } from './doctor.ts';
+import { probe, probeAllEngines } from './doctor.ts';
 import { loadEngineDeep } from './engineDeep.ts';
 import { discover, probeService, probeAll, loadManifest } from './services.ts';
 import { scanMcp, toAcpMcpServers } from './mcphub.ts';
@@ -219,12 +219,7 @@ async function probeEngines(): Promise<void> {
     // （gemini/codebuddy/qoder/openclaw 全部 25s 超时，但单独跑都是秒通）。
     // 引擎数还会继续涨（目录里还有候选），全并行必然雪崩。
     const specs = loadEngines();
-    const results: Array<Awaited<ReturnType<typeof probe>> | null> = [];
-    const CONCURRENCY = 3;
-    for (let i = 0; i < specs.length; i += CONCURRENCY) {
-      const slice = specs.slice(i, i + CONCURRENCY);
-      results.push(...(await Promise.all(slice.map((s) => probe(s).catch(() => null)))));
-    }
+    const results = await probeAllEngines(specs, (s) => probe(s).catch(() => null));
     // 握手只是协议层；`doctor --deep` 的结论（若跑过）才答得了"能不能真跑"。
     // 面板 4s 轮询一次，不能自己跑回合（要花钱），所以只读缓存。
     const deep = await loadEngineDeep();
