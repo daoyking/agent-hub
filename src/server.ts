@@ -23,6 +23,7 @@ import type * as acp from '@agentclientprotocol/sdk';
 import { BUILTIN_ENGINES, loadEngines, findEngine } from './registry.ts';
 import { runTurn } from './bus.ts';
 import { probe } from './doctor.ts';
+import { loadEngineDeep } from './engineDeep.ts';
 import { discover, probeService, probeAll, loadManifest } from './services.ts';
 import { scanMcp, toAcpMcpServers } from './mcphub.ts';
 import { resolveResume, aggregateStats } from './sessions.ts';
@@ -214,13 +215,34 @@ async function probeEngines(): Promise<void> {
   if (engineHealthBusy) return;
   engineHealthBusy = true;
   try {
-    const results = await Promise.all(loadEngines().map((s) => probe(s).catch(() => null)));
+    // 限并发：11 个引擎同时 spawn 会互相抢资源，实测出现 4 个握手超时
+    // （gemini/codebuddy/qoder/openclaw 全部 25s 超时，但单独跑都是秒通）。
+    // 引擎数还会继续涨（目录里还有候选），全并行必然雪崩。
+    const specs = loadEngines();
+    const results: Array<Awaited<ReturnType<typeof probe>> | null> = [];
+    const CONCURRENCY = 3;
+    for (let i = 0; i < specs.length; i += CONCURRENCY) {
+      const slice = specs.slice(i, i + CONCURRENCY);
+      results.push(...(await Promise.all(slice.map((s) => probe(s).catch(() => null)))));
+    }
+    // 握手只是协议层；`doctor --deep` 的结论（若跑过）才答得了"能不能真跑"。
+    // 面板 4s 轮询一次，不能自己跑回合（要花钱），所以只读缓存。
+    const deep = await loadEngineDeep();
     const next = new Map<string, { lamp: string; detail: string }>();
     for (const [i, r] of results.entries()) {
-      const spec = loadEngines()[i]!;
+      const spec = specs[i]!;
       if (r?.ok) {
         const ver = r.profile?.agentInfo?.version;
-        next.set(spec.id, { lamp: 'green', detail: `可用${ver ? ` · v${ver}` : ''}` });
+        const d = deep.get(spec.id);
+        if (d && !d.ok) {
+          // 握手 OK 但回合不通：降成 amber 并写明原因，别让绿灯骗人
+          next.set(spec.id, { lamp: 'amber', detail: `握手 OK，回合不通：${d.detail.slice(0, 90)}` });
+        } else {
+          next.set(spec.id, {
+            lamp: 'green',
+            detail: d?.ok ? `可用${ver ? ` · v${ver}` : ''} · 回合 ✓` : `可用${ver ? ` · v${ver}` : ''}`,
+          });
+        }
       } else {
         const err = r?.error ?? '未知错误';
         // 二进制都不存在 = 没装（grey），比"装了但坏了"（red）更准确

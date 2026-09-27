@@ -278,6 +278,20 @@ async function cmdDoctor(targets: string[], flags: Flags): Promise<void> {
       )
     : [];
 
+  // --deep 的结论落盘，供面板/托盘零成本消费：握手是**协议**层面的，答不了
+  // 「能不能真跑」。让 doctor 把这一层的答案写进缓存，面板据此把引擎灯
+  // 从「握手 OK」降级为「握手 OK 但回合不通」——否则用户只能在 ask 失败后才发现。
+  // 不用缓存就得每 4s 跑一次真实回合，那是要花钱的。
+  if (deepResults.length) {
+    try {
+      const { ENGINE_DEEP_FILE, saveEngineDeep } = await import('./engineDeep.ts');
+      await saveEngineDeep(deepResults.filter(Boolean) as Array<{ id: string; ok: boolean; detail: string }>);
+      console.log(`\n回合结果已写入 ${ENGINE_DEEP_FILE}（面板会据此显示引擎"回合不通"）`);
+    } catch (e) {
+      console.error(`写入回合结果失败（不影响本次体检）: ${e}`);
+    }
+  }
+
   let bad = 0;
   for (const r of results) {
     const info = r.profile?.agentInfo;

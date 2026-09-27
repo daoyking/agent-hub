@@ -339,7 +339,12 @@ $ agentbd serve uninstall  # 一键还原
 | `npm run ui-verify` | 面板 DOM 断言 17 项（真实 ui.html + jsdom + 真实 SSE） | ⚠️ 需先起 `serve` |
 | `npm run lamp-test` | 托盘灯色判定 8 项（Swift 联合编译） | ❌ |
 | `node src/cli.ts doctor` | 11 引擎握手 + 能力探测 | ✅ 需本机已登录 |
-| `node src/cli.ts doctor --deep` | 上面 + **真实跑一个回合**（区分"能连上"和"能用"）| ✅ 会产生模型调用费用 |
+| `node src/cli.ts doctor --deep` | 上面 + **真实跑一个回合**（区分"能连上"和"能用"），结果写入 `~/.agentbd/engine-deep.json` | ✅ 会产生模型调用费用 |
+
+`--deep` 的结论会被**面板零成本消费**：跑过一次后，握手通过但回合不通的引擎
+在面板上显示为 🟡（而不是 🟢），detail 写明"握手 OK，回合不通：…"。
+缓存默认 24h 过期（`AGENTBD_DEEP_TTL_MS`）——过期的结论比没有结论更危险，
+引擎可能后来就修好了。
 
 **为什么需要 `--deep`**：ACP 握手只验证**协议**，不验证凭证/配额/模型。实测 qwen
 握手 ✔ PASS 但真实回合报 `Use Qwen Code CLI to authenticate first`——doctor 说
