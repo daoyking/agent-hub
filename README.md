@@ -498,6 +498,31 @@ qwen 会报 `ECONNREFUSED 127.0.0.1:11434`，omp 则一直无输出。
 Cline sidecar、WindowServer）。同样条件下冷启动能到 56–91s。
 所以"本地模型很慢"里有一部分是**机器被别的应用占满**，不是模型本身。
 
-**实践建议**：本地模型适合低频、简单任务。密集或复杂编程任务切云端引擎
-（claude / codex / deepseek 系）。用 `agentbd doctor --deep` 可以直接看出
-某个引擎"是真能用还是只是能握手"。
+### ⚠️ 但"完整 agent 回合"是另一回事（2026-09-27 实测）
+
+裸 prompt 调用 7s 就返回，但**经 omp / qwen 跑一个完整回合**（带系统提示 +
+工具定义，prompt 通常几千 token）：
+
+| 模型 | 裸 prompt | 完整 agent 回合 |
+|---|---|---|
+| `qwen2.5-coder:14b` | 7s | **>150s（超时）** |
+| `qwen3:4b` | 4s | **>280s（超时）** |
+
+差距全在 **prefill 长度**：小模型逐 token 处理长系统提示，在本机
+（8 核、当时 load 30+）就是分钟级。**所以本地模型在这台机器上不适合驱动
+agentbd 的完整回合**，只适合"裸 ollama 直接问一句"。
+
+**建议**：
+- 低频且能等的任务 → `PI_SMOL_MODEL=qwen3:4b agentbd ask omp ... --timeout 600`
+- 日常编程任务 → 云端引擎（claude / codex / deepseek 系），免费额度够用时优先
+- 只想快速问一句 → 直接用 `ollama run <model>`，别绕 agentbd
+
+用 `agentbd doctor --deep` 可以直接看出某个引擎"是真能用还是只是能握手"——
+omp/qwen 会被判为**回合不通**，面板上显示 🟡 而不是骗人的绿灯。
+
+### 顺带修的一个环境问题
+
+排查时发现本机 `llama-server` 处于**空转卡死**状态：占 90% CPU、RSS 只有
+2.6MB（自称在服务 15GB 模型却只占 2.6MB 内存）、生成请求 20s 无响应。
+杀掉后模型正常加载（冷启 7s）。若本地模型突然变得极慢或无响应，
+先看 `ps -Ao pcpu,rss,comm | sort -rn | head` 里有没有 `llama-server` 在空转。
