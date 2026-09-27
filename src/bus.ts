@@ -30,7 +30,12 @@ export type EngineProfile = {
   protocolVersion: number;
   agentInfo?: { name?: string; version?: string };
   capabilities: Record<string, unknown>;
-  authMethods: Array<{ id: string; name?: string }>;
+  authMethods: Array<{
+    id: string;
+    name?: string;
+    /** ACP 的 _meta： 表示该认证需要交互式终端，不能自动调 */
+    meta?: Record<string, unknown>;
+  }>;
 };
 
 export type ApprovalLog = { request: ApprovalRequest; action: string; reason: string };
@@ -520,7 +525,7 @@ async function runTurnOnce(opts: RunTurnOptions): Promise<TurnResult> {
         protocolVersion: init.protocolVersion,
         agentInfo: (init as { agentInfo?: { name?: string; version?: string } }).agentInfo,
         capabilities: (init.agentCapabilities ?? {}) as Record<string, unknown>,
-        authMethods: (init.authMethods ?? []).map((m) => ({ id: m.id, name: m.name })),
+        authMethods: (init.authMethods ?? []).map((m) => ({ id: m.id, name: m.name, meta: (m as { _meta?: Record<string, unknown> })._meta })),
       };
 
       // ② 认证：必须在 session/new **之前**完成。initialize 声明了 authMethods
@@ -529,17 +534,32 @@ async function runTurnOnce(opts: RunTurnOptions): Promise<TurnResult> {
       // provider 的 key 是否有效无关（agnesd 的 agnes-provider 走 Keychain/账号态，
       // 凭证正常时无需交互）。需要交互输入的方式（浏览器 OAuth）失败则静默继续，
       // 让 prompt 报出真实原因。
-      if (profile.authMethods.length > 0) {
+      // ⚠️ 只对**可自动化**的认证方式调 authenticate。`_meta.type === 'terminal'`
+      // 表示这条认证要开交互式终端（实测 qwen 的 authMethods[0] 就是
+      // `{id:'openai', type:'terminal', args:['--auth-type=openai']}`）——
+      // 无脑调它会**永久阻塞**：agent 在等终端输入，agentbd 给不了。
+      // 之前这里没判类型，直接把 qwen 挂死（session/prompt 永不返回）。
+      // 非交互式（如 agnes 的 agnes-provider，走 Keychain 校验）才调。
+      const autoMethod = profile.authMethods.find((m) => {
+        const t = (m.meta as { type?: string } | undefined)?.type;
+        return t !== 'terminal';
+      });
+      if (autoMethod) {
         try {
-          const r = await ctx.request('authenticate', { methodId: profile.authMethods[0]!.id });
+          const r = await ctx.request('authenticate', { methodId: autoMethod.id });
           if (process.env.AGENTBD_DEBUG_AUTH) {
-            console.error(`[auth] ${profile.authMethods[0]!.id} ok:`, JSON.stringify(r));
+            console.error(`[auth] ${autoMethod.id} ok:`, JSON.stringify(r));
           }
         } catch (err) {
           if (process.env.AGENTBD_DEBUG_AUTH) {
-            console.error(`[auth] ${profile.authMethods[0]!.id} 失败:`, err);
+            console.error(`[auth] ${autoMethod.id} 失败:`, err);
           }
         }
+      } else if (profile.authMethods.length > 0 && process.env.AGENTBD_DEBUG_AUTH) {
+        console.error(
+          `[auth] 仅提供交互式认证方式（${profile.authMethods.map((m) => m.id).join(', ')}），` +
+            `已跳过以免阻塞；请先在引擎自己的 CLI 里完成登录`,
+        );
       }
 
       // ③ 建会话：new（默认） / load（恢复，重放历史） / resume（恢复，不重放）

@@ -199,10 +199,18 @@ export const BUILTIN_ENGINES: EngineSpec[] = [
     label: 'Qwen Code',
     vendor: 'Alibaba',
     command: 'qwen',
-    args: ['--acp'],
+    // ⚠️ --auth-type=openai 必填：非交互模式下 qwen 没它会直接报
+    // "No auth type is selected"，而在 ACP 下是**静默挂死**（prompt 永不返回）。
+    // env 默认指向本地 ollama 的 OpenAI 兼容端点（免费）；要换成云端就
+    // 在 ~/.agentbd/engines.json 里覆盖 env（shell 优先级最高）。
+    args: ['--acp', '--auth-type=openai', '-m', 'qwen3:4b'],
     channel: 'acp',
-    authHint: 'authMethods: openai（也可接 DeepSeek 等 OpenAI 兼容端点）',
-    note: '原生 ACP（`qwen --acp`，qwen-code 0.24.6 实测）；与 gemini-cli 同源',
+    env: {
+      OPENAI_API_KEY: 'ollama',
+      OPENAI_BASE_URL: 'http://127.0.0.1:11434/v1',
+    },
+    authHint: '默认走本地 ollama（免费，需 ollama 在跑）；换云端在 engines.json 覆盖 env',
+    note: '原生 ACP（qwen-code 0.24.6 实测）；模型用 -m 指定，默认取 ollama 首个',
   },
   {
     id: 'omp',
@@ -211,7 +219,14 @@ export const BUILTIN_ENGINES: EngineSpec[] = [
     command: 'omp',
     args: ['acp'],
     channel: 'acp',
-    authHint: '复用 omp 自己的 provider 凭证（omp auth）',
+    // omp 无默认模型配置（agent.db 的 settings 表是空的），不指定就会卡在
+    // 选模型上——而选模型是交互式的，ACP 下表现为 prompt 永不返回。
+    // 这里默认指向本地 ollama 的免费模型。
+    env: {
+      PI_SMOL_MODEL: 'qwen3:4b',
+      PI_SLOW_MODEL: 'qwen3:4b',
+    },
+    authHint: '默认走本地 ollama 免费模型（需 ollama 在跑）；换模型改 PI_SMOL_MODEL/PI_SLOW_MODEL',
     note: '原生 ACP（`omp acp`，oh-my-pi 18.3.0 实测）；能力最全：含 fork/resume/addDirs',
   },
   {

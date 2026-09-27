@@ -141,10 +141,14 @@ const svcs = (ports) => ports.map((p) => ({ id: `s${p}`, label: `s${p}`, managed
 const mcpEntries = await scanMcp(svcs([8080]));
 const byName = Object.fromEntries(mcpEntries.map((m) => [m.name, m]));
 // 本机实测：http MCP 指向 :9010（已无人监听），三个是 stdio
-check('http 指向死端口 → red', byName['browseros-neo']?.lamp, 'red');
-check('stdio → unknown（不假装健康）', byName['zai-mcp-server']?.lamp, 'unknown');
-check('stdio computer-use → unknown', byName['computer-use']?.lamp, 'unknown');
-check('stdio node_repl → unknown', byName['node_repl']?.lamp, 'unknown');
+// 断言**规则**而不是具体名字：MCP 清单来自各家 app 的配置，会随它们升级变化
+// （实测 ChatGPT.app 更新后 computer-use/node_repl 就变成了 cua_repl）。
+// 写死名字会让这个测试因为外部世界变动而假失败。
+check('http 指向死端口 → red', mcpEntries.filter((m) => m.transport === 'http').every((m) => m.lamp === 'red'), true);
+check('至少有一个 http 条目（前提成立）', mcpEntries.some((m) => m.transport === 'http'), true);
+check('stdio 全部 → unknown（不假装健康）', mcpEntries.filter((m) => m.transport === 'stdio').every((m) => m.lamp === 'unknown'), true);
+check('所有条目都有明确灯色（无 undefined）', mcpEntries.every((m) => !!m.lamp), true);
+check('没有任何 stdio 被误标成绿', mcpEntries.filter((m) => m.transport === 'stdio').some((m) => m.lamp === 'green'), false);
 
 // —— 沙箱越界：符号链接逃逸（安全关键）——
 const { assertInside } = await import('../src/bus.ts');

@@ -456,3 +456,31 @@ trae dir 写回与 `~/.omh` 对接经实测不适用，明确关闭（§13）。
   `agentbd serve --port 7801` + `npm i -D jsdom`）。渲染快照落到 `/tmp/ui-rendered.html`。
 - `shell/lamp-test.sh`——托盘灯色判定单测（red > amber > 其它；unknown 不压低绿灯；坏 JSON 不崩）。
 
+## 免费模型接入（本机默认）
+
+本机所有引擎默认走**本地 ollama**（`http://127.0.0.1:11434`），不花 API 额度。
+已固化的两个坑（都是实测踩出来的）：
+
+| 引擎 | 必须加的参数 | 不加会怎样 |
+|---|---|---|
+| `qwen` | `--auth-type=openai` | 非交互模式报 `No auth type is selected`；**在 ACP 下是静默挂死**（prompt 永不返回） |
+| `qwen` | `-m <模型名>` | 默认模型 `qwen3.7-max` 本地不存在 → `404 model not found` |
+| `omp` | `PI_SMOL_MODEL` / `PI_SLOW_MODEL` | omp 的 settings 表是空的 → 卡在**交互式选模型**，同样表现为挂死 |
+
+换云端模型：在 `~/.agentbd/engines.json` 里覆盖 `env`（shell 优先级最高），
+或直接 `OPENAI_BASE_URL=… agentbd ask qwen …`。
+
+### ollama 是这些引擎的前置依赖
+
+**ollama 没在跑时**（实测过一次：launchd job 注册着但进程已退出），
+qwen 会报 `ECONNREFUSED 127.0.0.1:11434`，omp 则一直无输出。
+面板上 `ollama :11434` 那盏灯就是为此存在的——先看它再调引擎。
+
+拉起来：`launchctl start com.ollama.ollama`（或打开 Ollama.app）。
+
+### 本地模型的速度现实
+
+`qwen3:4b` 跑一句「只回复 OK」实测 **>2 分钟**（含首次加载）。
+本地小模型适合低频、简单任务；密集或复杂任务仍建议切云端引擎
+（claude / codex / deepseek 系）。用 `agentbd doctor --deep` 可以直接
+看出某个引擎"是真能用还是只是能握手"。
