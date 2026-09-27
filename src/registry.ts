@@ -195,6 +195,16 @@ export const BUILTIN_ENGINES: EngineSpec[] = [
     note: '原生 ACP（`opencode acp`，v2.0.16 实测）；多 provider 聚合',
   },
   {
+    id: 'qwen',
+    label: 'Qwen Code',
+    vendor: 'Alibaba',
+    command: 'qwen',
+    args: ['--acp'],
+    channel: 'acp',
+    authHint: 'authMethods: openai（也可接 DeepSeek 等 OpenAI 兼容端点）',
+    note: '原生 ACP（`qwen --acp`，qwen-code 0.24.6 实测）；与 gemini-cli 同源',
+  },
+  {
     id: 'omp',
     label: 'Oh My Pi',
     vendor: 'Oh My Pi',

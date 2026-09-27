@@ -8,7 +8,7 @@
 > ⚫ 灰灯（未安装）或 🔴 红灯（装了但握手失败）——正是本项目这几个月一直在
 > 消灭的"假信号"。所以下面按**实测结论**分类。
 
-## ✅ 已接入且实测通过（8 个内置引擎）
+## ✅ 已接入且实测通过（10 个内置引擎）
 
 | id | 工具 | 启动方式 | 备注 |
 |---|---|---|---|
@@ -21,15 +21,20 @@
 | `opencode` | OpenCode | `opencode acp` | 原生 ACP |
 | `openclaw` | OpenClaw | `openclaw acp` | gateway-backed |
 | `omp` | Oh My Pi | `omp acp` | 原生 ACP，能力最全（fork/resume） |
+| `qwen` | Qwen Code | `qwen --acp` | 原生 ACP（qwen-code 0.24.6 实测），与 gemini-cli 同源 |
 
-## 🟡 有 ACP 迹象但**未在本机实测**（装上后先跑 `agentbd doctor` 验证）
+## ❌ 已实测确认**无 ACP**（装了才知道，别再猜）
 
-| 工具 | 安装 | 状态 |
+| 工具 | 怎么验的 | 结论 |
 |---|---|---|
-| Crush | `brew install charmbracelet/tap/crush` | 未装；charmbracelet 系通常有 ACP，**需验证子命令** |
-| GitHub Copilot CLI | `npm i -g @github/copilot` | 未装；`@github/copilot@1.0.88` 包元数据里**未见 acp 字样** |
-| Qwen Code | `npm i -g @google/qwen-code` | 未装；与 gemini 同源，**很可能有 ACP** |
-| Hermes | 见 awesome 指南 | 本机跑着 gateway（:65359），但**不是 ACP agent** |
+| GitHub Copilot CLI | `npm i -g @github/copilot` 装好后查 `--help` + 扫二进制 | `--help` **无 acp 子命令**；二进制里 5 处 "acp" 全是随机字节误匹配（无 `agent-client-protocol` 字样）→ **无 ACP** |
+| Crush | 查上游源码 `cmd/crush/main.go` + README | main.go **0 处 acp**，README 也不提 → **无原生 ACP**（本机 brew 下载持续超时未装成，但源码证据已足够） |
+
+## 🟡 特殊说明
+
+| 工具 | 说明 |
+|---|---|---|
+| Hermes | 本机跑着 gateway（:65359），但那是**服务网关**不是 ACP agent，无法直接当引擎用 |
 
 装完后这样加（id/args 按实际 `--help` 校正）：
 
