@@ -5,3 +5,5 @@ node_modules/
 .env
 .env.*
 shell/icons/
+# 基准测试产物：机器相关数据，脚本入库即可，结果不入库
+bench-*.json

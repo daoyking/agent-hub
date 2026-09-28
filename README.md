@@ -526,3 +526,90 @@ omp/qwen 会被判为**回合不通**，面板上显示 🟡 而不是骗人的�
 2.6MB（自称在服务 15GB 模型却只占 2.6MB 内存）、生成请求 20s 无响应。
 杀掉后模型正常加载（冷启 7s）。若本地模型突然变得极慢或无响应，
 先看 `ps -Ao pcpu,rss,comm | sort -rn | head` 里有没有 `llama-server` 在空转。
+
+## 负载敏感度基线：空机器 vs 满负载（2026-09-28 实测）
+
+前面几节反复出现"机器得空"这个前提，但一直没把负载当自变量固定下来测。
+现在补上：`scripts/bench.mjs` + `scripts/loadgen.mjs`，两个负载点各跑 3 轮。
+
+```bash
+node scripts/bench.mjs --label idle --repeat 3        # 空载基线
+node scripts/loadgen.mjs 3 300 &                      # 制造负载（3 循环，300s 自动熄火）
+node scripts/bench.mjs --label loaded --repeat 3
+```
+
+### 汇总（8 核机器，min/med/max）
+
+| 指标 | 空载（load 8） | 满载（load 76–90） | 劣化 |
+|---|---|---|---|
+| `doctor` 全 10 引擎 | 12.1 / 12.3 / 12.8 s | 19.2 / 25.9 / 30.1 s | **~2x** |
+| `services` L1+L2 探针 | 1.64 / 1.69 / 2.52 s | 3.69 / 3.98 / 6.64 s | **~2.4x** |
+| ollama 裸 prompt（热身后） | **0.20 s** | 8.3 / 16.4 / 29.0 s | **41–143x** |
+| 引擎可用性 | 10/10 | 9/10 ~ 10/10 | 见下 |
+
+**结论：agentbd 自身（doctor / 探针）对负载只有 2–2.4 倍敏感度，真正被负载击穿的是本地模型。**
+热身后 0.2 秒的裸 prompt，满载下要 8–29 秒。README 里"本地模型很慢"的印象，
+**绝大部分是机器被别的应用占满，不是模型本身**——这次把倍数钉死了。
+
+### 每引擎劣化（各取 3 轮最慢值）
+
+| 引擎 | 空载 | 满载 | 倍数 |
+|---|---|---|---|
+| openclaw | 2261ms | **25062ms** | 11.1x ⚠️ 一轮超时 FAIL |
+| agnes | 110ms | 452ms | 4.1x |
+| omp | 483ms | 1432ms | 3.0x |
+| opencode | 488ms | 1367ms | 2.8x |
+| qwen | 1118ms | 1986ms | 1.8x |
+| codebuddy | 996ms | 1686ms | 1.7x |
+| qoder | 1457ms | 2332ms | 1.6x |
+| gemini | 1406ms | 1505ms | 1.1x |
+| codex | 818ms | 582ms | 0.7x |
+| claude | 467ms | 314ms | 0.7x |
+
+三点值得注意：
+
+1. **超时的引擎不固定**。独立两次满载里，一次 `agnes` 15.6s 超时、
+   一次 `openclaw` 25s 超时。所以"满载下某引擎坏了"是**误判**——
+   它是排队饿死，换一轮就轮到别人。重启或重试都在掩盖真因。
+2. **claude / codex 反而更快**（0.7x）。它们是云端引擎，本机 CPU 抢不过
+   也无所谓；这行数据正好证明劣化来自**本机 CPU 争抢**而非网络或 agentbd 逻辑。
+3. **`openclaw` 是负载放大器**：空载就已 2.3s（最慢的引擎），满载 25s。
+   它对 `doctor` 总耗时影响最大，值得单独设更长超时而不是全局拉长。
+
+### ⚠️ macOS 的 load average 不能按 Linux 的 nproc 语义读
+
+只开 3 个忙循环，`load average` 报 76–90（8 核）。因为 Darwin 的 load
+把**所有可运行线程 + 不可中断态**都计入，不是 Linux 的" Runnable 进程/核"。
+所以别拿 `load > ncpu` 当节流阈值——在本机这几乎是常态。做阈值守护应该用
+CPU 占用率或内存压力（`memory_pressure`），而不是 load average。
+
+### 测出来的两个工具坑（已修）
+
+1. **`loadgen` 必须自带 TTL**。首版忙循环永不自终止，`nohup` 下父进程先死、
+   12 个循环变孤儿，把机器顶到 **load 192** 且 `kill` 父进程无法止损
+   （子进程被 reparent 到 init）。现在截止时间写进子进程自己的循环条件，
+   即使父进程被 `SIGKILL` 也会到期自杀——这条已用 `kill -9` 父进程实测验证。
+2. **`doctor` 有引擎 FAIL 时退出码为 1**，用 `execFile` 封装会把整轮测量炸掉，
+   而"满载下引擎 FAIL"恰恰是要测的东西。改为忽略退出码、只取 stdout。
+
+### 面板服务清单收敛到 lsh 同款
+
+`~/.agentbd/services.json` 原本 40 条（`services init` 从现场扫的），
+绝大多数是自动发现的噪音（WorkBuddy 随机端口、GoogleUpdater、CleanMyMac Updater…）。
+现按 lsh 实际管理/探测的范围收敛到 **6 条**：
+
+| 服务 | 端口 | 实测 |
+|---|---|---|
+| `com.litellm.gateway.service` | 8001 | 🟢 L2 200 |
+| `ollama` | 11434 | 🟢 L2 200 |
+| `com.anythingllm.web-proxy` | 8080 | 🟢 L2 200 |
+| `pid-70193` chroma（hermes 向量库） | 8100 | ⚫ 按需运行，不在属正常 |
+| `ai.omniroute.server` | — | 🟡 见下 |
+| `com.hermes.agent.service` | — | ⚫ RunAtLoad 跑完即退，非故障 |
+
+顺带修掉一个**清单声明错误**：`anythingllm.web-proxy` 原声明 9527，
+实测它一直在 **8080**，9527 是另一个 TRAE 项目占的。原声明会让面板长期报错灯。
+
+`ai.omniroute.server` 的 🟡 是**假警报**：它没在跑、也没有端口，
+但发现逻辑把 9527 上那个无关的 TRAE node 进程认成了它（cmdline 不匹配 → 判红）。
+它本身没端口可声明，所以要么给它显式端口、要么从清单里去掉。
