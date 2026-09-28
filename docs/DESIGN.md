@@ -101,7 +101,7 @@ type NormalizedEvent =
 | **WorkBuddy** | 驱动内置 `codebuddy --acp` | P0 | 已实测通过，GUI 不参与 |
 | **Agnes Code** | `agnesd agent` + wss `/acp?token=`（自建 acp-service 通道） | **P0 已接入** | goose 内核；doctor PASS，真实回合待 GUI 同步 key |
 | **TRAE SOLO CN** | `serve-web` → webview；复用其 `~/.trae-cn/mcps`、`skills` | P2 | **不支持内核级统一**，UI 需视觉隔离 |
-| Cline / OpenWorker / Omnigent / ccgui | 各自 CLI/ACP | P1 | Cline 有 `cline --acp` |
+| Cline / OpenWorker / Omnigent / ccgui | 各自 CLI/ACP | ~~P1~~ **阻塞** | ⚠️ 2026-09-28 实测：本机 `Cline.app` 内**无 `cline` CLI、全包 0 处 `agent-client-protocol`**，在跑的是 `code-sidecar --cline-hub-daemon :25463/hub`（自有协议，非 ACP）。「Cline 有 `cline --acp`」在本机不成立；要接需自建通道（同 agnes 量级）。详见 `agent-catalog.md` |
 | 其余 30+ 家 | 照抄 registry `distribution` | P2 | 加一条 = 一个 JSON 条目 |
 
 ## 3. 分阶段

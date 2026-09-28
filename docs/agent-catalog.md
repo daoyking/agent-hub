@@ -63,7 +63,7 @@
 
 ## 📌 结论与建议
 
-- **8 个已接入**，覆盖了 awesome 列表里绝大多数「终端可驱动」的工具；
+- **10 个已接入**（见上表），覆盖了 awesome 列表里绝大多数「终端可驱动」的工具；
 - 列表里剩下的多数是**桌面应用 / 编辑器扩展 / 聊天机器人**，与 agentbd 的
   「终端 agent 总线」定位不符，硬加只会制造噪音；
 - 想扩充的话，正确路径是**先装 → `agentbd doctor` 验证 → 再写进 engines.json**，
@@ -102,3 +102,41 @@ npm warn install-scripts Run `npm install -g --allow-scripts=@qwen-code/audio-ca
 
 > 本机 npm 已配 `allow-scripts=context-mode,better-sqlite3`（白名单制）。
 > 那是**有意的安全策略**——不要为了消掉一条警告就把它全局放开。
+
+---
+
+## 本机 agent 普查（2026-09-28，23 个 `~/.<agent>` 目录逐个核）
+
+上面的表是按「awesome 列表有什么」组织；这次换个方向：**本机实际留下痕迹的 agent，
+哪些能变成引擎**。判据仍是「一条记录 = 一条 ACP 启动命令」。
+
+### 结论：本轮**没有可新增的引擎**，但有 1 个真选项 + 1 处文档纠错
+
+| 类别 | agent | 证据 | 能否成为引擎 |
+|---|---|---|---|
+| 已是引擎（10） | claude codex gemini qoder codebuddy agnes opencode openclaw omp qwen | `agentbd engines` | ✅ |
+| **真装着、但无 ACP** | **Cline** | `Cline.app` 内**无 `cline` CLI、全包 0 处 `agent-client-protocol`**；在跑的是 `code-sidecar --cline-hub-daemon --port 25463 --pathname /hub`（自有 hub 协议） | ❌ 直接加不行，见下 |
+| | Hermes | `Hermes.app` + gateway 进程；gateway ≠ ACP agent（上文已记） | ❌ |
+| | TRAE SOLO CN | Electron，0 处 ACP 依赖，无 headless 入口；DESIGN 已归 P2「不支持内核级统一」 | ❌ |
+| **本体已卸载，只剩缓存** | Cursor(15340 文件) / Windsurf(69345) / CodeGeeX(17292) | `/Applications` 与 `~/Applications` 均无 .app；CodeGeeX 的 `codegeex-agent` mamba 环境里**找不到 agent 入口**（只有 bzip2/openssl 之类残留） | ❌ 无可执行文件 |
+| **空目录，从未安装** | kiro roo continue openhands iflow | `find -type f` = **0 个文件** | ❌ |
+| 误报 | `continue` | `type continue` → **bash 内建命令**，不是 agent | ❌ 别被 `command -v` 骗 |
+
+### ⚠️ 文档纠错：DESIGN.md 第 104 行「Cline 有 `cline --acp`」在本机不成立
+
+该行把 Cline 列为 P1 且注明「Cline 有 `cline --acp`」，但本机安装的
+`Cline.app` **没有对外 ACP 入口**（见上表证据）。可能是上游新版本或未发布的 CLI，
+**在本机不可依赖**。若日后要用，正确顺序仍是「装 → doctor 验证 → 再写 engines.json」。
+
+### 唯一真选项：给 Cline hub 写适配器（成本 ≈ agnes 的 `acp-service`）
+
+Cline 的 `code-sidecar` 在 `127.0.0.1:25463/hub` 上跑着**本机可达的私有协议**。
+要接就得像 agnes 那样**自建通道 + 逆向传输**，不是加一条 JSON 能解决的。
+是否值得，取决于你是否需要「agentbd 统一调度 Cline」——
+目前 Cline 是**驱动本机会话的上游**，把它再接回 agentbd 总线属于自指，价值有限。
+
+### 一个曾经的怀疑，已排除（记录以免重复调查）
+
+- ❌「mcphub 会把未安装的 agent 配置目录建出来」→ **不成立**：全仓 `mkdir` 只作用于
+  `~/.agentbd` 自身目录；`mcpwrite.ts:101` 写回前有 `exists()` 前置校验，
+  配置源不存在就跳过。**不会造假配置**，那 5 个空目录不是 agentbd 产生的。
