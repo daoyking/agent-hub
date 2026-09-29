@@ -86,11 +86,12 @@
   <h1>agentbd 面板</h1>
   <div id="filters">
     <input id="q" type="search" placeholder="筛选引擎 / 服务 / MCP…" autocomplete="off">
-    <label id="onlyUndecl" title="只看未登记进 services.json 的服务"><input type="checkbox">未登记</label>
+    <!-- id 仍是 onlyUndecl（ui-verify 断言引用它），但语义已从"只看未登记"改为"是否显示未登记" -->
+    <label id="onlyUndecl" title="勾选后在列表里显示未登记进 services.json 的服务。默认隐藏：清单要跟 lsh 的管理范围对齐；隐藏项的计数仍显示，搜索命中会自动放出"><input type="checkbox">含未登记</label>
   </div>
   <section class="grp" id="g-engines" open><summary>引擎 <span class="cnt" id="c-engines"></span></summary><div class="grp-body" id="engines"></div></section>
   <section class="grp" id="g-svc-ok" open><summary>本地服务 · 已登记 <span class="cnt" id="c-svc-ok"></span></summary><div class="grp-body" id="services-ok"></div></section>
-  <section class="grp" id="g-svc-new"><summary>本地服务 · 现场发现 <span class="cnt" id="c-svc-new"></span></summary><div class="grp-body" id="services-new"></div></section>
+  <section class="grp" id="g-svc-new"><summary title="现场发现但没登记进 services.json 的服务：默认不列在面板里（清单与 lsh 对齐）。计数照常显示，勾选「含未登记」或搜索可放出">本地服务 · 未登记 <span class="cnt" id="c-svc-new"></span></summary><div class="grp-body" id="services-new"></div></section>
   <section class="grp" id="g-mcp" open><summary>MCP Hub <span class="cnt" id="c-mcp"></span></summary><div class="grp-body" id="mcp"></div></section>
   <section class="grp" id="g-stats" open><summary>用量 <span class="cnt" id="c-stats"></span></summary><div class="grp-body" id="stats"></div></section>
 </aside>
@@ -129,7 +130,9 @@ function hl(s, q) {
 }
 const filters = () => ({
   q: $('q').value.trim().toLowerCase(),
-  onlyUndecl: $('onlyUndecl').querySelector('input').checked,
+  // 是否把未登记项也列出来。默认 false（清单要跟 lsh 的管理范围对齐）；
+  // 有搜索词时另有兜底，见 keep()。
+  showUndecl: $('onlyUndecl').querySelector('input').checked,
 });
 const hit = (text, f) => !f.q || String(text).toLowerCase().includes(f.q);
 const setCount = (id, n, shown) => {
@@ -206,20 +209,28 @@ function renderSide() {
     const label = x.label || x.id;
     // 已停止的整行淡一点，避免跟真正故障的红灯混在一起
     const faded = x.lamp === 'grey' ? ' style="opacity:.5"' : '';
-    return `<div class="row"${faded} title="${esc(x.detail)}${x.declared ? '' : '\n未登记进 services.json（agentbd services init 可纳管）'}">` +
+    return `<div class="row"${faded} title="${esc(x.detail)}${x.id.startsWith('pid-') ? ' · ' + esc(x.id) : ''}${x.declared ? '' : '\n未登记进 services.json（agentbd services init 可纳管）'}">` +
       `${lamp(x.lamp)}${hl(label, f.q)}` +
       `${x.declared ? '' : '<em class="undecl" title="未纳管">未登记</em>'}` +
       `${x.lamp === 'grey' ? (/未 launchctl load/.test(x.detail||'') ? '<em class="stopped" title="plist 存在但未 launchctl load">已停止</em>' : '<em class="stopped" title="当前未在运行（定时/按需/无调度信息）——不等于故障">当前不在</em>') : ''}${x.lamp === 'idle' ? '<em class="stopped" title="无端口且未声明 expectCmdline，无法探测存活">无从探测</em>' : ''}` +
       `<small>${esc(x.id.startsWith('pid-') ? '' : x.id)}${x.ports.map(p=>':'+p).join(' ')}</small></div>`;
   };
-  const keep = (x) => (!f.onlyUndecl || !x.declared) && hit(`${x.label || x.id} ${x.id} ${x.detail} ${x.ports.join(' ')}`, f);
-  const declared = s.services.filter(keep);
-  const fresh = s.services.filter((x) => !x.declared && keep(x));
-  $('services-ok').innerHTML = declared.map(svcRow).join('') || '<div class="row">(无匹配)</div>';
-  $('services-new').innerHTML = fresh.map(svcRow).join('') || '<div class="row">(无匹配)</div>';
+  // —— 本地服务：已登记 / 未登记两组。未登记**默认不列出来**：清单要跟 lsh 的
+  // 管理范围对齐，几十个现场噪音平铺进来就看不出重点了。
+  // 但「隐藏」绝不能退化成「悄悄少了」（这正是本面板早先踩过的坑，当时用户的第一
+  // 反应是"怎么少了一堆"），所以留两道出口：分组计数恒显示 N，搜索命中无条件放出。
+  const undeclShown = f.showUndecl || !!f.q;
+  const keep = (x) => hit(`${x.label || x.id} ${x.id} ${x.detail} ${x.ports.join(' ')}`, f);
+  const kept = s.services.filter(keep);
+  const decl = kept.filter((x) => x.declared);
+  const fresh = kept.filter((x) => !x.declared && undeclShown);
   const nDec = s.services.filter((x) => x.declared).length;
-  setCount('c-svc-ok', nDec, declared.length);
-  setCount('c-svc-new', s.services.length - nDec, fresh.length);
+  const nNew = s.services.length - nDec;
+  $('services-ok').innerHTML = decl.map(svcRow).join('') || '<div class="row">(无匹配)</div>';
+  $('services-new').innerHTML = fresh.map(svcRow).join('')
+    || (undeclShown ? '<div class="row">(无匹配)</div>' : `<div class="row">(已隐藏 ${nNew} 项，勾选「含未登记」显示)</div>`);
+  setCount('c-svc-ok', nDec, decl.length);
+  setCount('c-svc-new', nNew, fresh.length);
 
   // —— MCP ——
   const mcps = s.mcp.filter((m) => hit(`${m.name} ${m.target}`, f));
@@ -358,11 +369,17 @@ $('prompt').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shi
 // 筛选：输入即本地重渲染（不重新 fetch），且自动展开有命中的分组
 $('q').addEventListener('input', () => {
   renderSide();
+  // 有搜索词时未登记项会被无条件放出（见 undeclShown），所以一并展开分组，
+  // 别让命中藏在收起的组里——那又变成另一种「悄悄少了」。
   if ($('q').value.trim()) for (const el of document.querySelectorAll('section.grp')) el.open = true;
 });
-$('onlyUndecl').querySelector('input').addEventListener('change', () => {
+// 未登记开关：偏好记住（默认关）。必须在首帧之前恢复，故这段放在 refresh() 之前。
+const uBox = $('onlyUndecl').querySelector('input');
+try { uBox.checked = localStorage.getItem('agentbd.showUndecl') === '1'; } catch { /* 无痕模式下 localStorage 会抛 */ }
+uBox.addEventListener('change', () => {
+  try { localStorage.setItem('agentbd.showUndecl', uBox.checked ? '1' : '0'); } catch { /* 同上 */ }
   renderSide();
-  if (filters().onlyUndecl) $('g-svc-new').open = true;
+  if (uBox.checked) $('g-svc-new').open = true;
 });
 
 refresh(); setInterval(refresh, 5000);

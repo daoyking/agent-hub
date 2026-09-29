@@ -627,7 +627,7 @@ async function cmdServices(flags: Flags): Promise<void> {
     } else {
       console.log(`清单已存在，未改动: ${r.file}（${r.declared} 条）`);
       if (r.skippedNew.length) {
-        console.log(`现场另有 ${r.skippedNew.length} 个未登记发现，**未写入清单**（面板里仍以 [未登记] 显示）：`);
+        console.log(`现场另有 ${r.skippedNew.length} 个未登记发现，**未写入清单**（面板「本地服务 · 未登记」组里，默认隐藏，勾选「含未登记」或搜索可见）：`);
         console.log('  ' + r.skippedNew.slice(0, 12).join(', ') + (r.skippedNew.length > 12 ? ' …' : ''));
         console.log('确认要全部收录: agentbd services init --all');
       }

@@ -246,8 +246,12 @@ async function gatherState(): Promise<ServerState> {
   // 曾经这里按 `declared.has(id) || (managed !== 'unmanaged' && ports.length)` 过滤，
   // 结果是：**没登记进 services.json 的服务在面板上完全看不见**——本机明明在跑的
   // 进程一律静默消失，用户只能对着 lsof/系统设置自己数（"lsh 管本地服务，
-  // agentbd 里怎么少了一堆"）。现在全量显示，用 declared 字段区分"已登记/未登记"，
+  // agentbd 里怎么少了一堆"）。现在全量返回，用 declared 字段区分"已登记/未登记"，
   // 让遗漏变成**可见**而不是看不见；灯只对有意义的（登记过 / 有端口 / 非系统进程）判定。
+  //
+  // 2026-09-29 补充：**API 层始终返回全量**，"未登记默认不列出来"是 UI 层的显示偏好
+  // （ui.html 的「含未登记」开关，且计数恒显示、搜索命中无条件放出）。
+  // 别把这个偏好上移到这里的 filter——那等于把上面那个老 bug 重新造出来。
   const services = probed
     .filter((s) => {
       if (s.ports.length > 0) return true; // 监听端口的一律算服务
