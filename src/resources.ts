@@ -165,3 +165,121 @@ export async function readAssessment(): Promise<ResourceSnapshot & Assessment> {
   const snap = await getResources();
   return { ...snap, ...assess(snap) };
 }
+
+/**
+ * 脏页拆解：回答「swap 高到底是历史遗留还是在持续换页」。
+ *
+ * 只看 memory_free% 会得出错误结论——它把 inactive（可回收文件缓存）也算成空闲。
+ * 真正回不去的是 active + wired + compressor；这三项加起来逼近物理内存，
+ * 就说明 swap 高是算术必然，不是泄漏，也无法「清理」，只能减少常驻脏页或重启。
+ */
+export type MemBreakdown = {
+  totalGb: number;
+  /** vm_stat 的口径单位，别写死 16KB——它是按机器读的 */
+  pageSize: number;
+  activeGb: number;
+  inactiveGb: number;
+  wiredGb: number;
+  compressorGb: number;
+  freeGb: number;
+  /** 压缩器里装了多少逻辑数据（远大于 compressorGb，说明压缩在替你扛） */
+  compressedLogicalGb: number;
+  /** 自启动累计换页次数；两端都大 = 正在持续换页，不是历史遗留 */
+  swapins: number;
+  swapouts: number;
+};
+
+export async function sampleMemBreakdown(): Promise<MemBreakdown> {
+  const [out, pageSz, total] = await Promise.all([
+    run('vm_stat', []),
+    run('sysctl', ['-n', 'vm.page_size']),
+    run('sysctl', ['-n', 'hw.memsize']),
+  ]);
+  const pageSize = parseInt(pageSz, 10) || 16384;
+  const gb = (label: string) => {
+    const m = new RegExp(`${label}:\\s*(\\d+)\\.`).exec(out);
+    return m ? (parseInt(m[1]!, 10) * pageSize) / 1073741824 : 0;
+  };
+  const ctr = (label: string) => {
+    const m = new RegExp(`${label}:\\s*(\\d+)`).exec(out);
+    return m ? parseInt(m[1]!, 10) : 0;
+  };
+  return {
+    totalGb: (parseInt(total, 10) || 0) / 1073741824,
+    pageSize,
+    activeGb: gb('Pages active'),
+    inactiveGb: gb('Pages inactive'),
+    wiredGb: gb('Pages wired down'),
+    compressorGb: gb('Pages occupied by compressor'),
+    freeGb: gb('Pages free'),
+    compressedLogicalGb: gb('Pages stored in compressor'),
+    swapins: ctr('Swapins'),
+    swapouts: ctr('Swapouts'),
+  };
+}
+
+export type MemConsumer = { name: string; rssMb: number; procs: number; pids: number[] };
+
+/** 常见解释器：光看二进制名没用（一个 node 跑着十个不同脚本），要按脚本分。 */
+const RUNTIMES = /^(node|node2[0-9]|deno|bun|bunx|python|python3(?:\.\d+)?|Python|ruby|perl|java|php)$/;
+
+/**
+ * 按 App / 脚本聚合的内存排行（RSS 合计）。
+ *
+ * 两个坑都踩过，别再改回去：
+ * 1. 不能按进程看。Electron/Chrome 一个 App 就是十几个 helper，单看最大的只有
+ *    几百 MB，加起来才是真凶。
+ * 2. 不能用「argv[0] 的 basename」命名。macOS 路径里常有空格
+ *    （`~/Library/Application Support/...`），按空白切第一个 token 会切成
+ *    `.../Library/Application`，于是 MarvisKnowledgebase 等三个不相干的常驻件
+ *    被并成一个假的 "Application" 桶（实测 2.6GB，排第一却认不出来是谁）。
+ *    所以主名取 `comm`（内核记的可执行文件路径，没有参数歧义），
+ *    解释器再用 command 里的脚本名细分（取尾段：路径前缀被空格截断也无所谓，
+ *    basename 只要尾巴是对的就行）。
+ */
+export async function sampleTopMemory(limit = 14): Promise<MemConsumer[]> {
+  const [commOut, cmdOut] = await Promise.all([
+    run('ps', ['ax', '-o', 'rss=,pid=,comm='], 3000),
+    run('ps', ['ax', '-o', 'pid=,command='], 3000),
+  ]);
+  const scriptByPid = new Map<number, string>();
+  for (const line of cmdOut.split('\n')) {
+    const m = /^\s*(\d+)\s+(.+)$/.exec(line);
+    if (!m) continue;
+    const cmd = m[2]!;
+    const app = /\/([^/]+)\.app\//.exec(cmd);
+    if (app) {
+      scriptByPid.set(parseInt(m[1]!, 10), app[1]!);
+      continue;
+    }
+    // 解释器：用脚本名命名。允许路径含空格——只取以脚本后缀结尾的那一段的尾巴。
+    const scr = /([^\s]+)\.(mjs|cjs|js|py)(?=\s|$)/.exec(cmd);
+    if (scr) {
+      const tail = cmd.split(/\s+/).filter((t) => /\.(mjs|cjs|js|py)$/.test(t)).pop() ?? scr[0]!;
+      scriptByPid.set(parseInt(m[1]!, 10), tail.split('/').pop()!);
+    }
+  }
+
+  const byName = new Map<string, MemConsumer>();
+  for (const line of commOut.split('\n')) {
+    const m = /^\s*(\d+)\s+(\d+)\s+(.+)$/.exec(line);
+    if (!m) continue;
+    const rssMb = parseInt(m[1]!, 10) / 1024;
+    const pid = parseInt(m[2]!, 10);
+    const comm = m[3]!.trim();
+    const base = comm.split('/').pop() ?? comm;
+    const app = /\/([^/]+)\.app\//.exec(comm);
+    let name = app ? app[1]! : base;
+    if (!app && RUNTIMES.test(base)) name = scriptByPid.get(pid) ?? `${base}（未识别脚本）`;
+
+    const cur = byName.get(name) ?? { name, rssMb: 0, procs: 0, pids: [] };
+    cur.rssMb += rssMb;
+    cur.procs += 1;
+    if (cur.pids.length < 3) cur.pids.push(pid);
+    byName.set(name, cur);
+  }
+  return [...byName.values()]
+    .map((c) => ({ ...c, rssMb: Math.round(c.rssMb) }))
+    .sort((a, b) => b.rssMb - a.rssMb)
+    .slice(0, limit);
+}

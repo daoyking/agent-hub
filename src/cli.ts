@@ -34,7 +34,7 @@ import {
   aggregateLamp,
   SERVICES_FILE,
 } from './services.ts';
-import { readAssessment, THRESHOLDS } from './resources.ts';
+import { readAssessment, sampleMemBreakdown, sampleTopMemory, THRESHOLDS } from './resources.ts';
 
 import type { Health, ProbeLevel } from './services.ts';
 import { scanMcp, toAcpMcpServers, MCP_SOURCES } from './mcphub.ts';
@@ -565,6 +565,39 @@ function fmtAge(ms: number): string {
 /** 资源阈值读数（口径与阈值见 src/resources.ts） */
 async function cmdResources(flags: Flags): Promise<void> {
   const r = await readAssessment();
+  const deep = !!flags.deep;
+  if (deep) {
+    const [bd, top] = await Promise.all([sampleMemBreakdown(), sampleTopMemory(14)]);
+    if (flags.json) {
+      console.log(JSON.stringify({ ...r, breakdown: bd, top }, null, 2));
+      return;
+    }
+    const icon0 = r.level === 'ok' ? '🟢' : r.level === 'warn' ? '🟡' : '🔴';
+    console.log(`${icon0} 资源判定 ${r.level}${r.reasons.length ? '：' + r.reasons.join('；') : '：各项都在阈值内'}\n`);
+    const g = (n: number) => n.toFixed(1).padStart(5);
+    const dirty = bd.activeGb + bd.wiredGb + bd.compressorGb;
+    console.log(`脏页拆解（物理 ${bd.totalGb.toFixed(0)} GB · vm_stat 页大小 ${(bd.pageSize / 1024).toFixed(0)}KB）`);
+    console.log(`   active ${g(bd.activeGb)}  wired ${g(bd.wiredGb)}  compressor ${g(bd.compressorGb)}  ← 这三项回不去，合计 ${dirty.toFixed(1)} GB`);
+    console.log(`   inactive ${g(bd.inactiveGb)}（可回收文件缓存，memory_pressure 把它算进「空闲」）  free ${g(bd.freeGb)}`);
+    console.log(
+      `   压缩器：${bd.compressedLogicalGb.toFixed(1)} GB 逻辑数据压进 ${bd.compressorGb.toFixed(1)} GB 物理` +
+        `（约 ${(bd.compressedLogicalGb / Math.max(bd.compressorGb, 0.1)).toFixed(1)}× ）`,
+    );
+    console.log(
+      `   换页累计：swapouts ${(bd.swapouts / 1e6).toFixed(1)}M / swapins ${(bd.swapins / 1e6).toFixed(1)}M` +
+        (bd.swapins > 1e5 && bd.swapouts > 1e5 ? '  ← 双向都大 = 正在持续换页，不是历史遗留' : ''),
+    );
+    if (dirty > bd.totalGb * 0.6) {
+      console.log(`\n⚠️  脏页合计已达物理内存的 ${((100 * dirty) / bd.totalGb).toFixed(0)}%：swap 高是算术必然，不是泄漏。`);
+      console.log('    macOS 没有 swapoff，只能减少常驻脏页让系统慢慢回收；唯一能立即清零的是注销或重启。');
+    }
+    console.log('\n按 App 聚合 RSS（Electron/Chrome 一个 App 十几个 helper，按进程看会漏判）');
+    for (const c of top) {
+      console.log(`   ${(c.rssMb / 1024).toFixed(2).padStart(5)} GB  ${String(c.procs).padStart(3)} 个  ${c.name.slice(0, 44)}`);
+    }
+    console.log('\n   提示：RSS 含共享库，多项相加会重复计数，只用于排序不用于求和。');
+    return;
+  }
   if (flags.json) {
     console.log(JSON.stringify(r, null, 2));
     return;
@@ -580,6 +613,7 @@ async function cmdResources(flags: Flags): Promise<void> {
   );
   console.log('   注：刻意不用 load average——macOS 把不可中断线程也计入，本机 3 个忙循环即可冲到 76~90。');
   console.log('   临界时 ask/面板不会新开引擎进程；确要强行启动传 force=true。');
+  console.log('   想知道谁占的内存 / swap 为何下不来：加 --deep。');
 }
 
 async function cmdServices(flags: Flags): Promise<void> {
@@ -998,7 +1032,8 @@ async function cmdServe(flags: Flags): Promise<void> {
 const HELP = `agentbd 0.1.0 —— 多 agent + 本地服务 统一总线（P0 总线 + 服务层 + MCP Hub；P1 面板/写回/agnes）
 用法:
   【服务层】
-  agentbd resources [--json]                         资源阈值读数（CPU%/memory_pressure/swap；不用 load average）
+  agentbd resources [--json] [--deep]                资源阈值读数（CPU%/memory_pressure/swap；不用 load average）
+                                                     --deep 另给脏页拆解 + 按 App 内存排行
   agentbd services [--l1|--l2|--l3] [--all] [--json]  本地服务健康（L1端口/L2接口/L3语义）；--all 含未声明的裸监听
   agentbd services init                        已有清单→只报告差异（不改动）；无清单→从现场生成骨架
   agentbd services init --all                  强制把全部现场发现收录进清单（会灌入裸监听，慎用）
