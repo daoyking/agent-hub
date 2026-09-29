@@ -651,10 +651,33 @@ export async function discover(): Promise<LocalService[]> {
 const SYSTEM_NOISE =
   /^(rapportd|ControlCe|ControlCenter|logioptio|logioptionsplus_agent|WeChat|mDNSResponder|distnoted|cfprefsd|sharingd|WiFiAgent|secd|handoffd|airportd|powerd|diskarbitrationd|trustd|securityd|opendirectoryd|notifyd|coredeletiond|lsd|backupd|cloudphotod|photolibraryd|mediaanalysisd|corespotlightd|knowledge-agent|Spotlight|NotificationCenter|Dock|Finder|SystemUIServer)$/i;
 
-export async function initManifest(): Promise<string> {
+export type InitSummary = {
+  file: string;
+  wrote: boolean;
+  declared: number;
+  added: number;
+  skippedNew: string[];
+  missing: string[];
+};
+
+/**
+ * `services init`。
+ *
+ * 两种模式（2026-09-28 改）：
+ * - **清单已存在（默认）**：**不改清单，只报告差异**。
+ *   旧行为是「全量写入 + 把旧条目 merge 回来」——merge 保住了手工校准，
+ *   但每次 init 都把全部现场发现**再加回来**。实测本机 40 条里 34 条是这么来的
+ *   （WorkBuddy 随机端口、GoogleUpdater、CleanMyMac…），手工瘦到 6 条后
+ *   再跑一次 init 就前功尽弃。
+ *   关键事实：**未登记的发现在面板里照样以 `[未登记]` 行显示**，
+ *   所以「不写进清单」不等于「看不见」——这个项目的老原则（看不见=不存在）
+ *   在这里不适用，因为可见性由 discover() 保证，不靠清单收录。
+ * - **`--all` 或清单为空（首次）**：沿用全量写入，保证开箱能用。
+ */
+export async function initManifest(opts: { all?: boolean } = {}): Promise<InitSummary> {
   const list = await discover();
-  const existing = await loadManifest(); // 重新 init 不能冲掉手工校准/种子条目
-  const services: LocalService[] = list
+  const existing = await loadManifest();
+  const discovered: LocalService[] = list
     // 无端口的**托管**服务也写进来（launchd 守护型：dsh-web / alt-tab-macos 这类
     // 它们靠进程存活而非端口对外服务）。只过滤 unmanaged 且无端口的——那种
     // 基本是刚启动就退出的残留，记进去只会污染清单。
@@ -676,11 +699,43 @@ export async function initManifest(): Promise<string> {
         notes: '',
       };
     });
+
+  const declaredIds = new Set(existing.services.map((x) => x.id));
+  const skippedNew = discovered.filter((s) => !declaredIds.has(s.id)).map((s) => s.id);
+  const missing = existing.services.filter((s) => !discovered.some((d) => d.id === s.id)).map((s) => s.id);
+
+  // 已有清单且没点名 --all：只报告，不动数据（手工校准是权威）
+  if (existing.services.length > 0 && !opts.all) {
+    return { file: SERVICES_FILE, wrote: false, declared: existing.services.length, added: 0, skippedNew, missing };
+  }
+
+  // --all / 首次：全量写入，但**手工字段以清单为准**。
+  // 旧实现是 `services = discovered` 再把查不到的旧条目补回来——于是凡是
+  // 当下能发现的在服务，用户手写的 notes / expectCmdline / l2 / ports 每次 init
+  // 都被现场值悄悄覆盖（实测：手工校正的 anythingllm notes 被清成 ''）。
+  // 现场只能证明「它在听哪个端口」，不能证明「用户声明的期望是什么」。
+  const services: LocalService[] = discovered.map((d) => {
+    const old = existing.services.find((x) => x.id === d.id);
+    if (!old) return d;
+    const merged: LocalService = { ...d };
+    if (old.notes) merged.notes = old.notes;
+    if (old.expectCmdline) merged.expectCmdline = old.expectCmdline;
+    if (old.l2) merged.l2 = { ...old.l2 };
+    if (old.ports?.length) merged.ports = old.ports; // 手工端口优先（现场猜测会错）
+    return merged;
+  });
   for (const old of existing.services) {
     if (!services.some((x) => x.id === old.id)) services.push(old);
   }
   await saveManifest({ services });
-  return SERVICES_FILE;
+  return {
+    file: SERVICES_FILE,
+    wrote: true,
+    declared: services.length,
+    added: services.length - existing.services.length,
+    skippedNew: [],
+    missing,
+  };
 }
 
 // ─────────────────────────── 生命周期 ───────────────────────────

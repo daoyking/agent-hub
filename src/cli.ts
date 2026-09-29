@@ -564,8 +564,19 @@ async function cmdServices(flags: Flags): Promise<void> {
   const sub = flags._[0] ?? 'list';
 
   if (sub === 'init') {
-    const p = await initManifest();
-    console.log(`已生成清单骨架: ${p}\n请手工校准 expectCmdline / l2.expect / l3（技能 §3.7b：声明必须实测过）`);
+    const r = await initManifest({ all: !!flags.all });
+    if (r.wrote) {
+      console.log(`已写入清单: ${r.file}（共 ${r.declared} 条，本次新增 ${r.added}）`);
+      console.log('请手工校准 expectCmdline / l2.expect / l3（技能 §3.7b：声明必须实测过）');
+    } else {
+      console.log(`清单已存在，未改动: ${r.file}（${r.declared} 条）`);
+      if (r.skippedNew.length) {
+        console.log(`现场另有 ${r.skippedNew.length} 个未登记发现，**未写入清单**（面板里仍以 [未登记] 显示）：`);
+        console.log('  ' + r.skippedNew.slice(0, 12).join(', ') + (r.skippedNew.length > 12 ? ' …' : ''));
+        console.log('确认要全部收录: agentbd services init --all');
+      }
+    }
+    if (r.missing.length) console.log(`已登记但现场未发现（按需服务型属正常）: ${r.missing.join(', ')}`);
     return;
   }
 
@@ -966,7 +977,8 @@ const HELP = `agentbd 0.1.0 —— 多 agent + 本地服务 统一总线（P0 �
 用法:
   【服务层】
   agentbd services [--l1|--l2|--l3] [--all] [--json]  本地服务健康（L1端口/L2接口/L3语义）；--all 含未声明的裸监听
-  agentbd services init                        从现场发现生成清单骨架 ~/.agentbd/services.json
+  agentbd services init                        已有清单→只报告差异（不改动）；无清单→从现场生成骨架
+  agentbd services init --all                  强制把全部现场发现收录进清单（会灌入裸监听，慎用）
   agentbd services probe <id> [--l3]            单服务复测（L3 很贵，只手动触发）
   agentbd services up|down|restart <id>         生命周期（launchd 优先，未托管走 detached spawn）
   agentbd services logs <id>                    看服务日志尾部

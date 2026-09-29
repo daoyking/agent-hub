@@ -18,8 +18,9 @@
     "ui-verify": "node scripts/ui-verify.mjs",
     "lamp-test": "bash shell/lamp-test.sh",
     "failover-test": "node --import tsx scripts/failover-test.mjs",
-    "test": "npm run typecheck && npm run failover-test",
-    "typecheck": "tsc --noEmit"
+    "test": "npm run typecheck && npm run init-test && npm run failover-test",
+    "typecheck": "tsc --noEmit",
+    "init-test": "node scripts/init-test.mjs"
   },
   "engines": {
     "node": ">=22.6"

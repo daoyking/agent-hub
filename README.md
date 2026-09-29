@@ -20,7 +20,7 @@ node src/cli.ts ask claude --cwd /tmp --json "..." | jq . # NDJSON 事件流（�
 node src/cli.ts sessions                # 历史 transcript
 
 node src/cli.ts services                # 本地服务健康灯（L1 端口 / L2 接口 / L3 语义，--l3 才跑贵的）
-node src/cli.ts services init           # 从现场生成清单骨架 ~/.agentbd/services.json（再手工校准）
+node src/cli.ts services init           # 首次：从现场生成清单骨架；已有清单时：只报告差异、不改动（要全量收录加 --all）
 node src/cli.ts services restart <id>   # up / down / restart / logs / probe <id>
 node src/cli.ts mcp                     # 统一 MCP 视图（跨 agent 去重 + 关联本地服务灯）
 node src/cli.ts ask claude --with-mcp "..."  # 把 MCP Hub 清单注入该引擎会话（一份配置喂所有引擎）
@@ -321,7 +321,7 @@ $ agentbd serve uninstall  # 一键还原
 | `budget.json` | 预算限额（dailyUsd/monthlyUsd/dailyTokens/monthlyTokens/warnAt） |
 | `mcp-probe-cache.json` | MCP tools/list 探针结果缓存（TTL 2min，只缓存成功结果） |
 | `health.json` | 服务健康缓存，带 `at` 时间戳，聚合灯取最老一条的年龄 |
-| `services.json` | 服务清单（`services init` 生成骨架 + 手工校准，含 L2/L3 探针声明） |
+| `services.json` | 服务清单（首次由 `services init` 生成骨架 + 手工校准，含 L2/L3 探针声明；**之后 init 默认不改动它**，见「清单不再被 init 冲掉」） |
 | `engines.json` | 自定义引擎（同 id 覆盖内置字段，新 id 追加——新增 agent 的边际成本 = 加一条记录） |
 | `notify.json` | 告警通知（`enabled`/`webhook`/`minIntervalSec`；缺文件 = 默认开系统通知） |
 | `team.json` | 团队维度（hub/token/name + 共享池限额 sharedDailyTokens/sharedMonthlyTokens） |
@@ -613,3 +613,46 @@ CPU 占用率或内存压力（`memory_pressure`），而不是 load average。
 `ai.omniroute.server` 的 🟡 是**假警报**：它没在跑、也没有端口，
 但发现逻辑把 9527 上那个无关的 TRAE node 进程认成了它（cmdline 不匹配 → 判红）。
 它本身没端口可声明，所以要么给它显式端口、要么从清单里去掉。
+## 清单不再被 `services init` 冲掉（2026-09-28 修）
+
+上一节把清单从 40 条手工瘦到 6 条，但**跑一次 `services init` 就前功尽弃**——
+查下来是两个叠在一起的 bug：
+
+1. **`init` 是纯增量的**：`discover()` 的全部结果无条件写入，旧条目只是
+   "查不到的补回来"。本机实测现场有 **46 个未登记发现**（QQ、ClashX、
+   GoogleUpdater、CleanMyMac、v2ray、AgnesCode 的一堆随机端口…），
+   所以每次 init 都把清单顶回 52 条。
+2. **`init` 悄悄抹掉手工字段**：因为 discovered 直接胜出，凡是**当下能发现的**
+   服务，其 `notes` / `expectCmdline` / `l2` / `ports` 每次都被现场值覆盖。
+   实测证据：手工校正的 `anythingllm` 注释在 init 后变成空串。
+
+改后的语义：
+
+| 场景 | 行为 |
+|---|---|
+| 清单为空（首次） | 全量写入，保证开箱能用 |
+| 清单已存在（默认） | **不改动**，只报告：现场多出的 N 个未登记发现、已登记但现场没有的条目 |
+| `--all` | 全量收录，但**手工字段以清单为准**（notes/expectCmdline/l2/ports 现场不得覆盖） |
+
+这不违反本项目「看不见 ⇒ 等于不存在」的老原则——**未登记的东西面板照样以
+`[未登记]` 行显示**，可见性由 `discover()` 保证，不靠清单收录。清单的职责是
+「我声明的期望」，不是「现场快照」。
+
+### 回归测试
+
+`scripts/init-test.mjs`（已进 `npm test`）用 `HOME=<tmp>` 隔离真实清单
+（`SERVICES_FILE` 在模块加载时由 `os.homedir()` 求出，而 Node 的 `homedir()`
+尊重 `$HOME`）：首次 init 写满 → 手工裁到 1 条 → 再 init 必须仍是 1 条 →
+`--all` 才允许扩充且手工 notes 必须存活。
+
+**已验证该测试抓得住旧 bug**：回退代码后 3 项断言变红
+（清单涨回 35 条、notes 被抹两次）。其中 `ports` 两条在旧代码下也 PASS
+（现场发现恰好与声明相同），属防御性断言——但它的必要性由上文
+anythingllm 端口实测误判独立证实。
+
+### ⚠️ 操作教训：别把有依赖的命令放同一批并行执行
+
+本次测试 `--all` 时，"写 → 读 → 恢复备份"三条有依赖的命令被并行发出，
+`--all` 的写入在恢复**之后**才落盘，真实清单被顶成 52 条且当场没被发现。
+是事后 `diff` 复核才抓回来的。凡是「写后又读」或「测完要恢复」的序列，
+必须用 `&&` 串成一条命令。
