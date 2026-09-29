@@ -213,7 +213,7 @@ const checks = [
   ['② 顶栏含引擎选择与状态', !!document.getElementById('topbar')?.querySelector('#engine') && !!document.getElementById('status')],
   ['③ 现场发现分组有未登记标记', document.querySelectorAll('#services-new em.undecl').length >= 0],
   ['③ 已登记/现场发现分成两组', !!document.getElementById('services-ok') && !!document.getElementById('services-new')],
-  ['③ 侧栏分组可折叠(<details>)', document.querySelectorAll('section.grp').length >= 5],
+  ['③ 侧栏分组可折叠(<details>)', document.querySelectorAll('details.grp').length >= 5],
   ['③ 筛选框存在', !!document.getElementById('q')],
   ['③ 未登记过滤开关存在', !!document.querySelector('#onlyUndecl input[type=checkbox]')],
   ['③ 分组标题带计数', !!document.getElementById('c-svc-ok')?.textContent || !!document.getElementById('c-engines')?.textContent],

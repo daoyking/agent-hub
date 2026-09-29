@@ -26,23 +26,27 @@
   .deep-btn:hover:not(:disabled) { color:var(--fg); border-color:#3d4454; }
   .deep-btn:disabled { opacity:.5; cursor:default; }
   em.stopped { font-style:normal; font-size:10px; color:var(--dim); border:1px solid var(--line); border-radius:4px; padding:0 4px; margin-right:6px; }
-  em.stopped { font-style:normal; font-size:10px; color:var(--dim); border:1px solid var(--line); border-radius:4px; padding:0 4px; margin-right:6px; }
+  /* 免费模型的三类：真免费 / 本地自跑 / 标价 0 但托管要自付 */
+  em.kfree { font-style:normal; font-size:10px; color:#3fb950; border:1px solid #1c3d26; border-radius:4px; padding:0 4px; margin-right:6px; }
+  em.klocal { font-style:normal; font-size:10px; color:#58a6ff; border:1px solid #1f3350; border-radius:4px; padding:0 4px; margin-right:6px; }
+  em.kself { font-style:normal; font-size:10px; color:#d29922; border:1px solid #3a3020; border-radius:4px; padding:0 4px; margin-right:6px; }
+  .blk { color:var(--dim); font-size:10.5px; margin:7px 0 2px; padding-left:2px; }
   .mcp-target { color:var(--dim); font-size:11px; word-break:break-all; }
 
   /* ── 左栏：筛选 + 可折叠分组（服务变多后 44 条平铺太长）── */
   #filters { display:flex; gap:6px; margin-bottom:10px; position:sticky; top:-16px; background:var(--bg); padding:16px 0 8px; z-index:5; }
   #q { flex:1; min-width:0; padding:5px 8px; font-size:12.5px; }
   #onlyUndecl { flex:none; font-size:11px; color:var(--dim); display:flex; align-items:center; gap:3px; white-space:nowrap; cursor:pointer; user-select:none; }
-  section.grp { margin-top:10px; }
-  section.grp > summary {
+  .grp { margin-top:10px; }
+  .grp > summary {
     cursor:pointer; list-style:none; user-select:none;
     font-size:12px; color:var(--dim); text-transform:uppercase; letter-spacing:.08em;
     display:flex; align-items:center; gap:5px; padding:4px 0;
   }
-  section.grp > summary::-webkit-details-marker { display:none; }
-  section.grp > summary::before { content:'▸'; font-size:10px; transition:transform .12s; }
-  section.grp[open] > summary::before { transform:rotate(90deg); }
-  section.grp > summary .cnt { margin-left:auto; text-transform:none; letter-spacing:0; font-size:11px; }
+  .grp > summary::-webkit-details-marker { display:none; }
+  .grp > summary::before { content:'▸'; font-size:10px; transition:transform .12s; }
+  .grp[open] > summary::before { transform:rotate(90deg); }
+  .grp > summary .cnt { margin-left:auto; text-transform:none; letter-spacing:0; font-size:11px; }
   .grp-body { padding-left:2px; }
   .row.total { opacity:.6; border-top:1px solid var(--line); margin-top:4px; padding-top:6px; }
   .row mark { background:#3a2f10; color:#f0d78c; border-radius:3px; padding:0 1px; }
@@ -89,11 +93,12 @@
     <!-- id 仍是 onlyUndecl（ui-verify 断言引用它），但语义已从"只看未登记"改为"是否显示未登记" -->
     <label id="onlyUndecl" title="勾选后在列表里显示未登记进 services.json 的服务。默认隐藏：清单要跟 lsh 的管理范围对齐；隐藏项的计数仍显示，搜索命中会自动放出"><input type="checkbox">含未登记</label>
   </div>
-  <section class="grp" id="g-engines" open><summary>引擎 <span class="cnt" id="c-engines"></span></summary><div class="grp-body" id="engines"></div></section>
-  <section class="grp" id="g-svc-ok" open><summary>本地服务 · 已登记 <span class="cnt" id="c-svc-ok"></span></summary><div class="grp-body" id="services-ok"></div></section>
-  <section class="grp" id="g-svc-new"><summary title="现场发现但没登记进 services.json 的服务：默认不列在面板里（清单与 lsh 对齐）。计数照常显示，勾选「含未登记」或搜索可放出">本地服务 · 未登记 <span class="cnt" id="c-svc-new"></span></summary><div class="grp-body" id="services-new"></div></section>
-  <section class="grp" id="g-mcp" open><summary>MCP Hub <span class="cnt" id="c-mcp"></span></summary><div class="grp-body" id="mcp"></div></section>
-  <section class="grp" id="g-stats" open><summary>用量 <span class="cnt" id="c-stats"></span></summary><div class="grp-body" id="stats"></div></section>
+  <details class="grp" id="g-engines" open><summary>引擎 <span class="cnt" id="c-engines"></span></summary><div class="grp-body" id="engines"></div></details>
+  <details class="grp" id="g-svc-ok" open><summary>本地服务 · 已登记 <span class="cnt" id="c-svc-ok"></span></summary><div class="grp-body" id="services-ok"></div></details>
+  <details class="grp" id="g-svc-new"><summary title="现场发现但没登记进 services.json 的服务：默认不列在面板里（清单与 lsh 对齐）。计数照常显示，勾选「含未登记」或搜索可放出">本地服务 · 未登记 <span class="cnt" id="c-svc-new"></span></summary><div class="grp-body" id="services-new"></div></details>
+  <details class="grp" id="g-free"><summary title="从 GitHub 上的 LiteLLM 定价表筛出的免费模型，按三类分：云端免费额度 / 本地自跑 / 标价 0 但托管要自付。首次使用需下载约 3MB（约 30~40 秒），或先跑 agentbd models 预热">免费模型 <span class="cnt" id="c-free"></span></summary><div class="grp-body" id="free"></div></details>
+  <details class="grp" id="g-mcp" open><summary>MCP Hub <span class="cnt" id="c-mcp"></span></summary><div class="grp-body" id="mcp"></div></details>
+  <details class="grp" id="g-stats" open><summary>用量 <span class="cnt" id="c-stats"></span></summary><div class="grp-body" id="stats"></div></details>
 </aside>
 <main>
   <div id="topbar">
@@ -146,6 +151,28 @@ function log(cls, text) {
 }
 let lastState = null; // 筛选变化时本地重渲染，不必重新 fetch
 let lastStats = null;
+let lastModels = null;
+
+/**
+ * 免费模型清单。**刻意不并进 refresh()**：/api/models 走后端本地缓存，
+ * 首次可能回 {ready:false, warming:true}（后端在后台预热那 3MB 定价表），
+ * 所以这里要能自己轮询到「好」为止；顺带也让 /api/state 的体积和耗时不受影响。
+ */
+async function loadModels() {
+  try {
+    lastModels = await (await fetch('/api/models')).json();
+    renderSide();
+  } catch { /* 端点不可用时静默：分组里会显示"未取到"，不炸整个面板 */ }
+}
+
+/** 1048576 → 1M，131072 → 128K */
+function fmtCtx(n) {
+  if (n == null) return '';
+  if (n >= 1e6) return `${+(n / 1e6).toFixed(n % 1e6 ? 1 : 0)}M`;
+  if (n >= 1e3) return `${Math.round(n / 1e3)}K`;
+  return String(n);
+}
+
 /** 触发一次回合可用性检查（后端异步跑，这里只负责点按钮 + 轮询等结果） */
 async function deepCheck(id, btn) {
   btn.disabled = true; btn.textContent = '…';
@@ -231,6 +258,37 @@ function renderSide() {
     || (undeclShown ? '<div class="row">(无匹配)</div>' : `<div class="row">(已隐藏 ${nNew} 项，勾选「含未登记」显示)</div>`);
   setCount('c-svc-ok', nDec, decl.length);
   setCount('c-svc-new', nNew, fresh.length);
+
+  // —— 免费模型：三类必须分开标色。混成一片"免费"就是在骗人——
+  //   kfree=厂商免费额度(要 key) / klocal=本地自跑 / kself=标价 0 但托管要自付
+  const fm = lastModels;
+  if (!fm) {
+    $('free').innerHTML = '<div class="row">(未取到)</div>';
+    $('c-free').textContent = '';
+  } else if (!fm.ready) {
+    $('free').innerHTML = `<div class="row">${fm.warming ? '正在后台预热定价表（约 3MB，30~40 秒）…' : esc(fm.hint || '未就绪')}</div>`;
+    $('c-free').textContent = '';
+  } else {
+    const all = fm.models || [];
+    const rows = all.filter((m) => hit(`${m.id} ${m.provider} ${m.mode}`, f));
+    const KINDS = [
+      ['free-tier', '云端免费额度 · 要 key，有额度限制', 'kfree', '免费'],
+      ['local', '本地自跑 · 不花钱也不需要 key', 'klocal', '本地'],
+      ['self-hosted', '标价 0 但云托管要自付 · 模型免费，托管它的云要钱', 'kself', '自付'],
+    ];
+    const parts = [];
+    for (const [kind, title, cls, tag] of KINDS) {
+      const ks = rows.filter((m) => m.kind === kind).sort((a, b) => a.provider.localeCompare(b.provider) || a.id.localeCompare(b.id));
+      if (ks.length === 0) continue;
+      parts.push(`<div class="blk">${title}（${ks.length}）</div>`);
+      parts.push(ks.map((m) =>
+        `<div class="row" title="${esc(m.id)} · ${esc(m.provider)} · ${esc(m.mode)}${fm.stale ? '\n⚠ 数据可能已过期' : ''}">` +
+        `<em class="${cls}" title="${esc(title)}">${tag}</em>${hl(m.id, f.q)}` +
+        `<small>${esc(m.provider)} · ${esc(m.mode)}${m.maxInput ? ' · ' + fmtCtx(m.maxInput) : ''}</small></div>`).join(''));
+    }
+    $('free').innerHTML = parts.join('') || '<div class="row">(无匹配)</div>';
+    setCount('c-free', all.length, rows.length);
+  }
 
   // —— MCP ——
   const mcps = s.mcp.filter((m) => hit(`${m.name} ${m.target}`, f));
@@ -371,7 +429,7 @@ $('q').addEventListener('input', () => {
   renderSide();
   // 有搜索词时未登记项会被无条件放出（见 undeclShown），所以一并展开分组，
   // 别让命中藏在收起的组里——那又变成另一种「悄悄少了」。
-  if ($('q').value.trim()) for (const el of document.querySelectorAll('section.grp')) el.open = true;
+  if ($('q').value.trim()) for (const el of document.querySelectorAll('.grp')) el.open = true;
 });
 // 未登记开关：偏好记住（默认关）。必须在首帧之前恢复，故这段放在 refresh() 之前。
 const uBox = $('onlyUndecl').querySelector('input');
@@ -383,6 +441,8 @@ uBox.addEventListener('change', () => {
 });
 
 refresh(); setInterval(refresh, 5000);
+// 免费模型单独轮询：60s 一次即可（后端读的是本地缓存，不是每 5s 一次的 /api/state）
+loadModels(); setInterval(loadModels, 60000);
 </script>
 </body>
 </html>

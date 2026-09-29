@@ -236,6 +236,51 @@ async function stateCached(fresh: boolean): Promise<ServerState> {
   return stateInflight;
 }
 
+/**
+ * `/api/models` 的数据源。**刻意不并进 `/api/state`**：
+ * 定价表 3MB、JSON.parse 一次要几十~上百毫秒，而 gatherState 每 5 秒跑一轮；
+ * 首次还要下载 30~40 秒。放进去就是拿面板的可用性去赌——这正是我上次
+ * 修 `/api/state` 慢时定下的原则：重活不进请求路径。
+ *
+ * 所以这里是独立端点 + 进程内 memo（默认 5 分钟）：
+ * 只读本地缓存；没有缓存就**后台预热**并如实回 ready:false，让面板显示"预热中"。
+ */
+const MODELS_TTL_MS = 5 * 60 * 1000;
+let modelsMemo: { at: number; data: Awaited<ReturnType<typeof import('./models.ts').loadCachedFreeModels>> } | null = null;
+let modelsWarming = false;
+
+async function modelsPayload(): Promise<Record<string, unknown>> {
+  const { loadCachedFreeModels, loadFreeModels, summarize } = await import('./models.ts');
+  if (!modelsMemo || Date.now() - modelsMemo.at > MODELS_TTL_MS) {
+    modelsMemo = { at: Date.now(), data: await loadCachedFreeModels() };
+  }
+  const data = modelsMemo.data;
+  if (!data && !modelsWarming) {
+    // 后台预热，不阻塞本次响应；下载完把 memo 作废，下次请求就能拿到
+    modelsWarming = true;
+    void loadFreeModels()
+      .then(() => { modelsMemo = null; })
+      .catch(() => { /* 预热失败就保持 ready:false，面板会显示怎么手动预热 */ })
+      .finally(() => { modelsWarming = false; });
+  }
+  if (!data) {
+    return {
+      ready: false,
+      warming: modelsWarming,
+      hint: '首次使用需下载约 3MB 定价表（30~40 秒）；也可以先跑 `agentbd models` 预热',
+    };
+  }
+  return {
+    ready: true,
+    warming: modelsWarming,
+    fetchedAt: data.fetchedAt,
+    stale: data.stale,
+    totalInTable: data.totalInTable,
+    summary: summarize(data.models),
+    models: data.models,
+  };
+}
+
 async function gatherState(): Promise<ServerState> {
   ensureEngineHealthTimer();
   const probed: LocalService[] = await Promise.all(
@@ -519,6 +564,8 @@ export async function startServer(opts: {
           res.end(uiHtml);
         } else if (req.method === 'GET' && url.pathname === '/api/state') {
           json(res, 200, await stateCached(url.searchParams.get('fresh') === '1'));
+        } else if (req.method === 'GET' && url.pathname === '/api/models') {
+          json(res, 200, await modelsPayload());
         } else if (req.method === 'GET' && url.pathname === '/events') {
           res.writeHead(200, {
             'Content-Type': 'text/event-stream',

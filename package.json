@@ -20,7 +20,8 @@
     "failover-test": "node --import tsx scripts/failover-test.mjs",
     "models-test": "node scripts/models-test.mjs",
     "ui-undecl-test": "node scripts/ui-undecl-test.mjs",
-    "test": "npm run typecheck && npm run init-test && npm run guard-test && npm run models-test && npm run ui-undecl-test && npm run failover-test",
+    "ui-models-test": "node scripts/ui-models-test.mjs",
+    "test": "npm run typecheck && npm run init-test && npm run guard-test && npm run models-test && npm run ui-undecl-test && npm run ui-models-test && npm run failover-test",
     "typecheck": "tsc --noEmit",
     "init-test": "node scripts/init-test.mjs",
     "guard-test": "node scripts/guard-test.mjs"

@@ -84,6 +84,23 @@ export function pickFreeModels(raw: Record<string, unknown>): FreeModel[] {
   return out;
 }
 
+/**
+ * **只读本地缓存**，不发起任何网络请求。给面板用：
+ * 面板轮询不能等 30~40 秒的下载，更不该让每次请求都去碰网。
+ * 没有缓存就返回 null，由调用方决定是否后台预热。
+ */
+export async function loadCachedFreeModels(): Promise<FreeModelReport | null> {
+  const cached = await readCache();
+  if (!cached) return null;
+  return {
+    models: pickFreeModels(cached.raw),
+    totalInTable: Object.keys(cached.raw).length,
+    fetchedAt: cached.meta.fetchedAt,
+    cached: true,
+    stale: ageOf(cached.meta.fetchedAt) >= CACHE_TTL_MS,
+  };
+}
+
 export interface FreeModelReport {
   models: FreeModel[];
   totalInTable: number;
