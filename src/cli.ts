@@ -34,6 +34,8 @@ import {
   aggregateLamp,
   SERVICES_FILE,
 } from './services.ts';
+import { readAssessment, THRESHOLDS } from './resources.ts';
+
 import type { Health, ProbeLevel } from './services.ts';
 import { scanMcp, toAcpMcpServers, MCP_SOURCES } from './mcphub.ts';
 import { probeMcpEntriesCached } from './mcpprobe.ts';
@@ -560,6 +562,26 @@ function fmtAge(ms: number): string {
   return s < 60 ? `${s}s` : `${Math.round(s / 60)}min`;
 }
 
+/** 资源阈值读数（口径与阈值见 src/resources.ts） */
+async function cmdResources(flags: Flags): Promise<void> {
+  const r = await readAssessment();
+  if (flags.json) {
+    console.log(JSON.stringify(r, null, 2));
+    return;
+  }
+  const icon = r.level === 'ok' ? '🟢' : r.level === 'warn' ? '🟡' : '🔴';
+  console.log(`${icon} 资源判定 ${r.level}${r.reasons.length ? '：' + r.reasons.join('；') : '：各项都在阈值内'}`);
+  console.log(
+    `   CPU ${r.cpuPct.toFixed(1)}%（${r.cores} 核） · 内存空闲 ${r.memFreePct.toFixed(0)}% · swap 已用 ${r.swapUsedPct.toFixed(0)}%`,
+  );
+  console.log(`   来源 ${r.via.cpu} / ${r.via.mem} / ${r.via.swap}`);
+  console.log(
+    `   阈值 CPU warn≥${THRESHOLDS.cpu.warn} crit≥${THRESHOLDS.cpu.critical}｜内存空闲 warn≤${THRESHOLDS.memFree.warn} crit≤${THRESHOLDS.memFree.critical}｜swap warn≥${THRESHOLDS.swapUsed.warn} crit≥${THRESHOLDS.swapUsed.critical}`,
+  );
+  console.log('   注：刻意不用 load average——macOS 把不可中断线程也计入，本机 3 个忙循环即可冲到 76~90。');
+  console.log('   临界时 ask/面板不会新开引擎进程；确要强行启动传 force=true。');
+}
+
 async function cmdServices(flags: Flags): Promise<void> {
   const sub = flags._[0] ?? 'list';
 
@@ -976,6 +998,7 @@ async function cmdServe(flags: Flags): Promise<void> {
 const HELP = `agentbd 0.1.0 —— 多 agent + 本地服务 统一总线（P0 总线 + 服务层 + MCP Hub；P1 面板/写回/agnes）
 用法:
   【服务层】
+  agentbd resources [--json]                         资源阈值读数（CPU%/memory_pressure/swap；不用 load average）
   agentbd services [--l1|--l2|--l3] [--all] [--json]  本地服务健康（L1端口/L2接口/L3语义）；--all 含未声明的裸监听
   agentbd services init                        已有清单→只报告差异（不改动）；无清单→从现场生成骨架
   agentbd services init --all                  强制把全部现场发现收录进清单（会灌入裸监听，慎用）
@@ -1043,6 +1066,8 @@ async function main(): Promise<void> {
       return cmdBudget(flags._);
     case 'db':
       return cmdDb(flags);
+    case 'resources':
+      return cmdResources(flags);
     case 'services':
       return cmdServices(flags);
     case 'mcp':

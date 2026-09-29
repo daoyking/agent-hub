@@ -26,6 +26,7 @@ import { runTurn } from './bus.ts';
 import { probe, probeAllEngines } from './doctor.ts';
 import { loadEngineDeep, saveEngineDeep } from './engineDeep.ts';
 import { discover, probeService, probeAll, loadManifest } from './services.ts';
+import { readAssessment, type ResourceSnapshot } from './resources.ts';
 import { scanMcp, toAcpMcpServers } from './mcphub.ts';
 import { resolveResume, aggregateStats } from './sessions.ts';
 import { checkBudget } from './budget.ts';
@@ -53,6 +54,8 @@ export type ServerState = {
     sse: number;
     uptimeSec: number;
   };
+  /** 资源读数 + 阈值判定（阈值见 src/resources.ts，刻意不用 load average） */
+  resources?: ResourceSnapshot & { level: string; reasons: string[] };
   engines: Array<{
     id: string;
     label: string;
@@ -252,6 +255,7 @@ async function gatherState(): Promise<ServerState> {
     })),
     services,
     mcp,
+    resources: await readAssessment(),
     residency: {
       mode: socketActivated ? 'launchd-socket' : 'manual',
       idleExitMs: idleExitCfg,
@@ -359,6 +363,28 @@ async function handleAsk(body: Record<string, unknown>): Promise<void> {
     });
     return;
   }
+  // 资源守卫：机器已经扛不住时不再新开一个引擎进程。
+  // 拒绝必须**可见**——沿用面板已认识的 ask.error 事件，而不是静默排队/失败。
+  // 阈值口径见 src/resources.ts（CPU% + memory_pressure + swap，刻意不含 load average）。
+  // body.force === true 可强行越过（面板/脚本自己决定要赌一把时用）；
+  // AGENTBD_GUARD_DISABLE=1 则整体关掉守卫（专用机/批跑场景，启动就该知道自己在裸奔）。
+  const guardOff = process.env.AGENTBD_GUARD_DISABLE === '1';
+  if (!guardOff && body.force !== true) {
+    const res = await readAssessment();
+    if (res.level === 'critical') {
+      broadcast({
+        k: 'ask.error',
+        engine: engineId,
+        error:
+          `资源已达临界（${res.reasons.join('；')}），未启动 ${spec.id}。` +
+          `先停掉一些负载，或明确传 force=true 强行启动。（判定来源: ${res.via.mem} / ${res.via.swap}）`,
+        resourceBlocked: true,
+      });
+      return;
+    }
+    if (res.level === 'warn') console.warn(`[guard] ${spec.id} 启动前资源偏紧: ${res.reasons.join('；')}`);
+  }
+
   const cwd0 = typeof body.cwd === 'string' ? body.cwd : process.cwd();
   const approval = body.approval === 'auto' || body.approval === 'deny' ? body.approval : 'guard';
 
@@ -598,6 +624,11 @@ export async function startServer(opts: {
       (idleExitCfg
         ? ` · 空闲 ${Math.round(idleExitCfg / 60000)}min 自退（但托盘的 SSE 连接会阻止自退）`
         : ' · 不会自退（未启用 idle 退出）'),
+  );
+  console.log(
+    process.env.AGENTBD_GUARD_DISABLE === '1'
+      ? '资源守卫: 已关闭（AGENTBD_GUARD_DISABLE=1）— 临界负载下也会照常新开引擎进程'
+      : '资源守卫: 开启（CPU% / memory_pressure / swap；临界时拒绝新开引擎，force=true 可越过）',
   );
   if (opts.idleExitMs && opts.idleExitMs > 0) {
     let active = 0;
