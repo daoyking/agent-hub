@@ -610,9 +610,51 @@ CPU 占用率或内存压力（`memory_pressure`），而不是 load average。
 顺带修掉一个**清单声明错误**：`anythingllm.web-proxy` 原声明 9527，
 实测它一直在 **8080**，9527 是另一个 TRAE 项目占的。原声明会让面板长期报错灯。
 
-`ai.omniroute.server` 的 🟡 是**假警报**：它没在跑、也没有端口，
-但发现逻辑把 9527 上那个无关的 TRAE node 进程认成了它（cmdline 不匹配 → 判红）。
-它本身没端口可声明，所以要么给它显式端口、要么从清单里去掉。
+`ai.omniroute.server` 当时显示的 🟡 是**假警报**，根因见下一节；已修，现在它如实显示 ⚫。
+
+## 两个假警报的根因（2026-09-28 修）
+
+### 1）node 被当成「具体可执行文件」，launchd 作业互相抢端口
+
+`discover()` 给 launchd 作业认领监听端口时，如果 `ProgramArguments[0]` 看起来
+足够具体，就直接用 `cmdline.includes(exe)` 找进程。通用解释器白名单里原本只有
+`python3 / env / sh / bash / zsh`——**没有 node**。
+
+于是 `args[0] = /opt/homebrew/bin/node` 的作业会认领**第一个含 node 的监听进程**。
+`ai.omniroute.server`（本身未运行、无端口）因此被绑到 9527 上一个无关的
+TRAE node 进程，再因为 `expectCmdline`（`omniroute.mjs`）对不上而判 🟡。
+
+修法两处，缺一不可：
+- node/bun/deno（含 homebrew 与 Cellar 路径）一律视为**通用解释器**，改走脚本路径 token 匹配；
+- **token 里必须剔掉解释器本身**——`args[0]` 也是「长度>8 且含 /」的路径，
+  留着它去 `cmdline.includes(token)` 等于「认领任意 node 进程」，同一个 bug
+  会从 token 分支原地复发（第一版修复就栽在这里）。
+
+回归验证：`ai.agentbd.serve` 仍正确绑 7787、litellm 8001、anythingllm 8080，
+omniroute 回到无端口 ⚫。
+
+### 2）拿 litellm 的 `/health` 当存活探针 ⇒ 健康的网关被判故障
+
+`L2_HINTS[8001]` 原本声明 `/health`。实测：
+
+| 端点 | 结果 |
+|---|---|
+| `/v1/models` | **HTTP 200，33ms**，返回 `{"data":[…]}` |
+| `/health` | 8s / 20s 均无响应，且**访问日志里没有这一行** → 卡在 handler 内部 |
+
+litellm 的 `/health` 会**逐个探上游 provider**，上游不可达就阻塞不返回。
+拿它当 L2 存活探针，等于把「网关活着」和「所有上游可达」混成一盏灯。
+
+按本项目自己的分层改正：**L2（接口能用）= `/v1/models`**，
+**L3（语义可用、很贵只手动触发）= `/health`**。改后：
+
+```
+🟢 L1 8001 · L2 HTTP 200 (87ms)          # 默认视图：网关活着
+🟡 L2 HTTP 200 · L3 TimeoutError (20048ms) # 只在 --l3 时才说上游的事
+```
+
+> 顺带：`L2_HINTS` 里那条注释还写着「实测，当前已停止」，而服务已运行 1 天 18 小时。
+> **探针声明和注释一样会过期**——这正是 L3 必须手动触发的原因。
 ## 清单不再被 `services init` 冲掉（2026-09-28 修）
 
 上一节把清单从 40 条手工瘦到 6 条，但**跑一次 `services init` 就前功尽弃**——

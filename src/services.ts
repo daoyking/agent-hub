@@ -76,7 +76,7 @@ const L2_HINTS: Record<number, { path: string; expect?: string }> = {
   11434: { path: '/api/tags', expect: '"models"' },   // ollama（实测）
   18790: { path: '/health' },                          // openclaw gateway（实测）
   8080: { path: '/health' },                           // proxy_server（实测）
-  8001: { path: '/health' },                           // litellm gateway（实测，当前已停止）
+  8001: { path: '/v1/models' },                          // litellm gateway（/health 是深度检查，见下方 L3；2026-09-28 实测降级）
   9010: { path: '/mcp' },                              // browseros-neo mcp
   8000: { path: '/api/health' },
   3000: { path: '/api/health' },
@@ -570,11 +570,33 @@ export async function discover(): Promise<LocalService[]> {
   // ① launchd 作业 → 用 ProgramArguments 里的路径型 token 去完整 cmdline 找进程
   // 可执行文件（args[0]）足够具体时，只认它：防止参数里的路径 token（如
   // omh-menubar 的 --hermes-home /Users/jindy/.hermes）张冠李戴到别的服务进程上。
-  const GENERIC_EXE = new Set(['/usr/bin/python3', '/usr/bin/env', '/bin/sh', '/bin/bash', '/bin/zsh']);
+  //
+  // ⚠️ node/bun/deno 这类**通用解释器必须算通用**（2026-09-28 修）：
+  // 它们被几十个互不相关的 launchd 作业共用。曾经只有 python3/sh 在表里，
+  // 于是 args[0]=/opt/homebrew/bin/node 的作业走 `cmdline.includes(exe)` 分支，
+  // 认领了**第一个含 node 的监听进程**——ai.omniroute.server（本身无端口、未运行）
+  // 因此被绑到 9527 上一个无关的 TRAE node 进程，再因 expectCmdline 不匹配判 🟡。
+  // 归为通用后改走 script 路径 token 匹配（如 …/omniroute.mjs），才会命中自己。
+  const GENERIC_EXE = new Set([
+    '/usr/bin/python3',
+    '/usr/bin/env',
+    '/bin/sh',
+    '/bin/bash',
+    '/bin/zsh',
+    '/opt/homebrew/bin/node',
+    '/usr/local/bin/node',
+    '/usr/local/bin/bun',
+    '/opt/homebrew/bin/bun',
+    '/opt/homebrew/bin/deno',
+  ]);
+  const exeGeneric = (exe: string) => GENERIC_EXE.has(exe) || /\/(node|nodejs|bun|deno)$/.test(exe);
   for (const p of pl) {
-    const tokens = p.args.filter((a) => a.length > 8 && a.includes('/'));
     const exe = p.args[0] ?? '';
-    const exeSpecific = exe.length > 8 && exe.includes('/') && !GENERIC_EXE.has(exe);
+    // token 只取**参数里的路径**（脚本路径等），且必须剔掉解释器本身：
+    // args[0] 常是 /opt/homebrew/bin/node 这类通用解释器，留着它去
+    // `cmdline.includes(token)` 等于「认领任意 node 进程」，和上面那条 bug 同源。
+    const tokens = p.args.filter((a, i) => i !== 0 && a.length > 8 && a.includes('/') && !exeGeneric(a));
+    const exeSpecific = exe.length > 8 && exe.includes('/') && !exeGeneric(exe);
     // 可执行文件具体但没匹配到 → 进程没在监听（不为别的端口认领）；只有通用 exe 才回退任意 token
     const hit = exeSpecific
       ? ls.find((l) => l.cmdline?.includes(exe))
