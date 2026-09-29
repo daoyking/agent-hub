@@ -915,3 +915,54 @@ Marvis 的 LaunchAgent 是 `RunAtLoad` 无 `KeepAlive`，所以退出后不会�
   内核把连接分到两边，于是两份独立缓存会让返回值看起来「时间倒退」。
   重启 serve 后用 `lsof -nP -iTCP:7787 -sTCP:LISTEN` 确认只有一个监听者。
 
+## 免费模型清单：`agentbd models`（2026-09-29）
+
+从 **GitHub 上的 LiteLLM 定价表**里挑出免费模型。选这个源是因为本项目的
+litellm 网关就是按这张表路由的，模型名能直接对上（`gemini/gemini-2.0-flash`
+这种 litellm id 可以直接喂给网关）。
+
+```bash
+agentbd models                          # 全部免费模型，按三类分组
+agentbd models --chat                   # 只看对话模型
+agentbd models --provider gemini        # 按厂商
+agentbd models --mode embedding         # 按用途（chat/rerank/embedding/…）
+agentbd models --search gemma           # 关键字
+agentbd models --refresh                # 强制重拉（默认走 24h 缓存）
+agentbd models --json                   # 给下游脚本用
+```
+
+### 「免费」必须分三类说，否则就是在骗人
+
+| 类别 | 含义 | 本机实测数量 |
+|---|---|---|
+| **云端免费额度** | 厂商给免费额度，要 key，有速率/额度限制 | 100 |
+| **本地自跑** | 跑在自己机器上，不花钱也不需要 key | 34 |
+| **标价 0 但托管自付** | 模型本身标价 0，但托管它的云（azure_ai / sagemaker / vertex_ai / fireworks…）要钱 | 20 |
+
+实测全表 **4422** 条里"进出成本都是 0"的共 **154** 条（3.48%），其中 chat 104 个。
+第三类是最容易被含糊过去的一类：只按价格过滤的话，它们会和真·免费额度混在一起，
+用户看到"免费"就去接，结果账单冒出来。宁可丑一点分开列。
+
+### 数据源里的三个坑（都已在 `pickFreeModels` 挡住，测试钉死）
+
+1. **表里第一条是 `sample_spec`**，那是**文档占位符**：provider 写着
+   `one of https://docs.litellm.ai/docs/providers`、mode 写着 `one of: chat, embedding…`，
+   而 `input_cost_per_token` 恰好是 `0.0`。只按成本过滤就会凭空多出一个"免费模型"。
+   → 排除 provider 含空格/URL 的条目，并显式排除 `sample_spec`。
+2. **有的条目只有 `input=0`、`output` 字段缺失**（实测 4 个，如 `perplexity/sonar-*-online`）。
+   缺失是「未知」不是「免费」 → 必须两个都**是数值** 0 才算。
+3. 零成本里混着要自付托管费的（见上表第三类）→ 单列 `self-hosted`。
+
+### 缓存与容错（这份文件 3MB，本机下载要 30~40 秒）
+
+- 默认缓存 24h 到 `~/.agentbd/model-prices.json`，`--refresh` 强制重拉；
+- 带 **ETag 条件请求**，远端没变返回 304 就**不重下 3MB**（只更新时间戳）；
+- 写入走**临时文件 + rename 原子替换**。这条是被现实逼出来的：实测 3MB 在本机
+  要 ~35s，第一次尝试就被 30s 超时**截断**成 2.49MB 的坏文件——所以下载结果先过
+  `validTable()` 校验（键数 > 500），**坏数据直接丢弃，绝不覆盖已有缓存**；
+- 拉取失败但有缓存 → 用旧缓存并打 ⚠️ 标注「N 天前」，而不是让命令直接失败。
+
+回归：`scripts/models-test.mjs`（20 项，纯函数、不碰网络不碰缓存），
+已并入 `npm test`。已知边界：源在 `main` 分支，结构若大改会被 `validTable()` 挡住并
+报「内容不像定价表」，此时需要更新解析而不是让它静默产出空列表。
+

@@ -23,6 +23,7 @@ import type { ApprovalRequest, NormalizedEvent, DiffEntry } from './normalize.ts
 import { listTranscripts, resolveResume, aggregateStats } from './sessions.ts';
 import { loadBudget, saveBudget, checkBudget, hasAnyLimit, BUDGET_FILE } from './budget.ts';
 import type { BudgetLimits } from './budget.ts';
+import type { FreeKind } from './models.ts';
 import {
   discover,
   probeService,
@@ -86,6 +87,11 @@ type Flags = {
   idleMin: number;
   /** serve 团队 hub 模式的共享密钥（非回环绑定必填） */
   token?: string;
+  /** models：只看某个厂商 / 某种用途 / 含关键字的免费模型 */
+  provider?: string;
+  mode?: string;
+  search?: string;
+  chatOnly: boolean;
   _: string[];
 };
 
@@ -106,6 +112,7 @@ function parseArgs(argv: string[]): Flags {
     noBudget: false,
     refresh: false,
     idleMin: 10,
+    chatOnly: false,
     _: [],
   };
   for (let i = 0; i < argv.length; i++) {
@@ -133,6 +140,10 @@ function parseArgs(argv: string[]): Flags {
     else if (a === '--fd') flags.fd = Number(argv[++i]);
     else if (a === '--idle') flags.idleMin = Number(argv[++i]);
     else if (a === '--token') flags.token = argv[++i];
+    else if (a === '--provider') flags.provider = argv[++i];
+    else if (a === '--mode') flags.mode = argv[++i];
+    else if (a === '--search') flags.search = argv[++i]?.toLowerCase();
+    else if (a === '--chat') flags.chatOnly = true;
     else if (a === '--resume') {
       const v = argv[i + 1];
       if (v && !v.startsWith('-')) { flags.resume = v; i++; }
@@ -1013,6 +1024,89 @@ async function cmdPanel(args: string[]): Promise<void> {
   }
 }
 
+/** 上下文的紧凑写法：1048576 → 1M，131072 → 128K */
+function fmtCtx(n: number | undefined): string {
+  if (n == null) return '—';
+  if (n >= 1e6) return `${+(n / 1e6).toFixed(n % 1e6 ? 1 : 0)}M`;
+  if (n >= 1e3) return `${Math.round(n / 1e3)}K`;
+  return String(n);
+}
+
+/**
+ * `agentbd models` —— 从 GitHub 上的 LiteLLM 定价表里挑出**免费**模型。
+ * 「免费」的三类在输出里必须分开说，否则就是在骗人：
+ * 厂商免费额度 / 本机自跑 / 标价 0 但云托管要自付。
+ */
+async function cmdModels(flags: Flags): Promise<void> {
+  const { loadFreeModels, summarize, PRICES_URL } = await import('./models.ts');
+  let rep: Awaited<ReturnType<typeof loadFreeModels>>;
+  try {
+    rep = await loadFreeModels({ refresh: flags.refresh, onProgress: (s) => console.error(s) });
+  } catch (e) {
+    console.error((e as Error).message);
+    process.exitCode = 1;
+    return;
+  }
+  const sum = summarize(rep.models);
+  let list = rep.models;
+  if (flags.provider) list = list.filter((m) => m.provider === flags.provider);
+  if (flags.mode) list = list.filter((m) => m.mode === flags.mode);
+  if (flags.chatOnly) list = list.filter((m) => m.mode === 'chat');
+  if (flags.search) {
+    const q = flags.search;
+    list = list.filter((m) => `${m.id} ${m.provider}`.toLowerCase().includes(q));
+  }
+
+  if (flags.json) {
+    console.log(
+      JSON.stringify(
+        { source: PRICES_URL, fetchedAt: rep.fetchedAt, cached: rep.cached, stale: rep.stale, totalInTable: rep.totalInTable, summary: sum, models: list },
+        null,
+        2,
+      ),
+    );
+    return;
+  }
+
+  if (rep.note) console.log(`\x1b[33m⚠ ${rep.note}\x1b[0m`);
+  const pct = ((sum.total / rep.totalInTable) * 100).toFixed(2);
+  console.log(
+    `\x1b[1m免费模型 ${sum.total} 个\x1b[0m · 云端免费额度 ${sum.byKind['free-tier']} · 本地自跑 ${sum.byKind.local} · 标价 0 但托管自付 ${sum.byKind['self-hosted']}`,
+  );
+  console.log(
+    `全表 ${rep.totalInTable} 条中占 ${pct}% · 其中 chat ${sum.chat} 个 · 数据源 LiteLLM 定价表（GitHub）· 抓取于 ${rep.fetchedAt.replace('T', ' ').slice(0, 16)} · 缓存 24h`,
+  );
+  const shown = list.length;
+  if (shown !== sum.total) {
+    const bits = [flags.provider && `provider=${flags.provider}`, flags.mode && `mode=${flags.mode}`, flags.chatOnly && 'chat', flags.search && `含"${flags.search}"`].filter(Boolean);
+    console.log(`筛选：${bits.join(' · ')} → ${shown} 个`);
+  }
+  if (shown === 0) {
+    console.log('（无匹配）');
+    return;
+  }
+
+  const groups: Array<[FreeKind, string]> = [
+    ['free-tier', '云端免费额度 · 需要 key，有速率/额度限制'],
+    ['local', '本地自跑 · 不花钱也不需要 key，占自己的机器'],
+    ['self-hosted', '标价 0 但云托管要自付 · 模型本身免费，托管它的云要钱'],
+  ];
+  for (const [kind, title] of groups) {
+    const rows = list.filter((m) => m.kind === kind).sort((a, b) => a.provider.localeCompare(b.provider) || a.id.localeCompare(b.id));
+    if (rows.length === 0) continue;
+    // 列宽按实际数据算（写死 46 会让长模型名把「上下文」列冲歪，表格一歪就没法看了）
+    const wProv = Math.max(8, ...rows.map((m) => m.provider.length));
+    const wMode = Math.max(4, ...rows.map((m) => m.mode.length));
+    const wId = Math.max(5, ...rows.map((m) => m.id.length));
+    console.log(`\n\x1b[1m▎${title}\x1b[0m（${rows.length}）`);
+    console.log(`  ${'PROVIDER'.padEnd(wProv)}  ${'MODE'.padEnd(wMode)}  ${'MODEL'.padEnd(wId)}  上下文`);
+    for (const m of rows) {
+      console.log(`  ${m.provider.padEnd(wProv)}  ${m.mode.padEnd(wMode)}  ${m.id.padEnd(wId)}  ${fmtCtx(m.maxInput)}`);
+    }
+  }
+  console.log(`\n\x1b[2m提示：--chat 只看对话模型 · --provider gemini 按厂商筛 · --mode embedding 按用途筛 · --refresh 强制重拉 · --json 给下游用\x1b[0m`);
+}
+
 async function cmdServe(flags: Flags): Promise<void> {
   // —— launchd 按需唤醒安装：不用时系统里没有 agentbd 进程 ——
   const sub = flags._[0];
@@ -1103,6 +1197,8 @@ const HELP = `agentbd 0.1.0 —— 多 agent + 本地服务 统一总线（P0 �
   agentbd budget                                预算护栏：查看限额 + 今日/本月用量
   agentbd budget set dailyTokens=100000 dailyUsd=5 [monthlyTokens=… warnAt=0.8]
   agentbd budget clear                          清空限额
+  agentbd models                               免费模型清单（抓 GitHub 上的 LiteLLM 定价表，缓存 24h）
+        --chat --provider gemini --mode embedding --search gemma --refresh --json
 
 引擎: ${loadEngines().map((e) => e.id).join(', ')}
 自定义引擎: ${ENGINES_FILE}（同 id 覆盖内置字段，新 id 追加）
@@ -1133,6 +1229,8 @@ async function main(): Promise<void> {
       return cmdServices(flags);
     case 'mcp':
       return cmdMcp(flags);
+    case 'models':
+      return cmdModels(flags);
     case 'serve':
       return cmdServe(flags);
     case 'team':
