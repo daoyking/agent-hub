@@ -512,7 +512,10 @@ export async function startServer(opts: {
           }
         }
         if (req.method === 'GET' && url.pathname === '/') {
-          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+          // no-store：面板 HTML 直接来自磁盘上的 ui.html，改完刷新就该立刻看到。
+          // 不加这个头，浏览器会走启发式缓存，用户刷新后看到的还是旧 UI，
+          // 会误以为「代码改了但没生效」——本地开发面板不值得为此冒险。
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
           res.end(uiHtml);
         } else if (req.method === 'GET' && url.pathname === '/api/state') {
           json(res, 200, await stateCached(url.searchParams.get('fresh') === '1'));
