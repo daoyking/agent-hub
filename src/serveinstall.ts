@@ -123,18 +123,61 @@ export async function serveUninstall(): Promise<void> {
   console.log(`已卸载并删除: ${PLIST}`);
 }
 
-export async function serveStatus(): Promise<void> {
-  console.log(`plist: ${(await exists(PLIST)) ? PLIST : '(未安装)'}`);
+export interface ServeHealth {
+  plistPath: string;
+  plistExists: boolean;
+  /** launchd 里有没有这个作业 */
+  loaded: boolean;
+  state: string;
+  pid?: string;
+  port?: string;
+  idleMin?: string;
+  /** 需要人处理的问题（每条都带可执行的修复命令） */
+  problems: string[];
+}
+
+/**
+ * serve 安装状态体检。**单独抽出来是因为 doctor 也要用**：
+ * 之前只有 serveStatus 一边查一边打印，doctor 想复用就得把 stdout 截字符串，
+ * 而"plist 在不在"这件事恰恰是必须结构化判断的（见 problems）。
+ */
+export async function serveHealth(): Promise<ServeHealth> {
+  const plistExists = await exists(PLIST);
+  let loaded = true;
+  let state = '?';
+  let pid: string | undefined;
   try {
     const { stdout } = await exec('launchctl', ['print', `${domain()}/${SERVE_LABEL}`]);
-    const state = stdout.match(/state = (\w+)/)?.[1] ?? '?';
-    const pid = stdout.match(/pid = (\d+)/)?.[1];
-    console.log(`launchd: state=${state}${pid ? ` pid=${pid}` : '（未在跑，等待首个连接拉起）'}`);
+    state = stdout.match(/state = (\w+)/)?.[1] ?? '?';
+    pid = stdout.match(/pid = (\d+)/)?.[1];
   } catch {
-    console.log('launchd: 未加载');
+    loaded = false;
   }
-  if (await exists(PLIST)) {
+  let port: string | undefined;
+  let idleMin: string | undefined;
+  if (plistExists) {
     const raw = await readFile(PLIST, 'utf8');
-    console.log(`端口: ${raw.match(/SockServiceName<\/key>\s*<string>(\d+)/)?.[1] ?? '?'} · 空闲退出: ${raw.match(/--idle<\/string>\s*<string>([\d.]+)/)?.[1] ?? '?'}min`);
+    port = raw.match(/SockServiceName<\/key>\s*<string>(\d+)/)?.[1];
+    idleMin = raw.match(/--idle<\/string>\s*<string>([\d.]+)/)?.[1];
   }
+
+  const problems: string[] = [];
+  if (!plistExists) {
+    // 实测踩过：plist 会从磁盘上凭空消失（这台机器装着 CleanMyMac HealthMonitor）。
+    // serve 带 --idle 会自退，于是"自退 + 没有 plist"= 整个 hub 静默瘫掉，没人知道为什么。
+    problems.push(`plist 不在磁盘上（${PLIST}）——装过清理工具的机器上会被删掉，修复: agentbd serve install`);
+  } else if (!loaded) {
+    problems.push('plist 在，但 launchd 里没有加载这个作业，修复: agentbd serve install（幂等重装）');
+  }
+  return { plistPath: PLIST, plistExists, loaded, state, pid, port, idleMin, problems };
+}
+
+export async function serveStatus(): Promise<void> {
+  const h = await serveHealth();
+  console.log(`plist: ${h.plistExists ? h.plistPath : '(未安装)'}`);
+  console.log(
+    `launchd: ${h.loaded ? `state=${h.state}${h.pid ? ` pid=${h.pid}` : '（未在跑，等待首个连接拉起）'}` : '未加载'}`,
+  );
+  if (h.plistExists) console.log(`端口: ${h.port ?? '?'} · 空闲退出: ${h.idleMin ?? '?'}min`);
+  for (const p of h.problems) console.log(`⚠️  ${p}`);
 }

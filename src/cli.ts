@@ -318,7 +318,33 @@ async function cmdDoctor(targets: string[], flags: Flags): Promise<void> {
     }
   }
   console.log(`\n${results.length - bad}/${results.length} 个引擎可用`);
-  if (bad > 0) process.exitCode = 1;
+
+  // —— serve 安装自检 ——
+  // 为什么值得放进 doctor：plist 会被清理工具删掉（实测在这台机器上发生过），
+  // 而 serve 带 --idle 会自退，两者叠加就是"整个 hub 静默瘫掉、没人知道为什么"。
+  // 以前只有 `serve status` 能查到，等发现面板连不上时已经晚了；环境性故障不该
+  // 指望人记得去查某个子命令。用独立计数，别把比例算成 (N-1)/N。
+  let serveBad = 0;
+  try {
+    const { serveHealth } = await import('./serveinstall.ts');
+    const h = await serveHealth();
+    const mark = h.problems.length ? '\x1b[31m✘ FAIL\x1b[0m' : '\x1b[32m✔ PASS\x1b[0m';
+    const parts = [
+      h.plistExists ? 'plist ✓' : 'plist ✘ 不在磁盘上',
+      !h.plistExists ? 'launchd —' : h.loaded ? `launchd ✓ state=${h.state}${h.pid ? ` pid=${h.pid}` : ''}` : 'launchd ✘ 未加载',
+      h.port ? `端口 ${h.port}` : '',
+      h.idleMin ? `空闲退出 ${h.idleMin}min` : '',
+    ].filter(Boolean);
+    console.log(`\n${mark} serve 安装   ${parts.join(' · ')}`);
+    for (const p of h.problems) {
+      console.log(`         ${p}`);
+      serveBad += 1;
+    }
+  } catch (e) {
+    // 自检本身失败不能连带否掉引擎结论（例如 launchctl 不可用）
+    console.log(`\n\x1b[33m⚠ serve 自检未能执行（不影响引擎结论）: ${(e as Error).message}`);
+  }
+  if (bad > 0 || serveBad > 0) process.exitCode = 1;
 }
 
 async function askInteractive(req: ApprovalRequest): Promise<boolean> {
