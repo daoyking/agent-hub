@@ -764,21 +764,119 @@ macOS 的 load average 把**不可中断线程**也计入运行队列，只跑 3
 「写 services.json → 读它 → 恢复备份」被并行执行，写入在恢复之后才落盘，
 真实清单被顶成 52 条且当场没发现，是事后 `diff` 才抓回来的。
 
-### 顺带定位到的性能问题（尚未修）
+### `/api/state` 慢的真实原因（**上一轮的归因是错的**，2026-09-29 修正并修好）
 
-`GET /api/state` 实测 **12~19 秒**，而它被面板/托盘轮询。拆开量：
+上一轮我写下「多出的 ~11s 在引擎健康那一段」。**那是错的**，而且错得很典型：
+我是从「总耗时 − 服务层耗时」倒推的，没有单独量过引擎段。实际读代码就发现
+`gatherState` 里的引擎段**早就只是读内存缓存**（`engineHealth.get(id)?.lamp`，
+见 server.ts 的引擎健康缓存注释），根本不 spawn 引擎，压根不可能花 11s。
 
-| 段 | 耗时 |
+在同一个进程里逐段实测（`/tmp/brk2.mjs`，不带 HTTP）：
+
+| 段 | 真实耗时 |
 |---|---|
-| `discover()` 纯发现（56 个服务） | 0.86s |
-| CLI 侧 `services --l2`（发现 + 全量探针） | 1.0s |
-| `GET /api/stats`（轻端点） | 2.3s |
-| `GET /api/state` | **12~19s** |
+| `discover()` | 0.18s |
+| `probeAll()`（52 个服务，L1→L3） | 0.08s |
+| `scanMcp()`（3 条） | 0.01s |
+| `readAssessment()` | 0.34s（300ms CPU 窗口 + `memory_pressure -Q` + `sysctl`） |
+| **gatherState 串行合计** | **≈0.6s** |
 
-服务层只占约 1s，**多出的 ~11s 在引擎健康那一段**（`gatherState` 里 engines 相关），
-不是服务探测；health detail 里也没有 timeout 记录，所以不是探针挂死。
-这同时解释了 serve 的 CPU 开销：托盘每几秒轮询一个十几秒的端点会堆请求。
+那 8~19s 是哪儿来的？是**并发重复全量 gather** + **引擎探测风暴** + **机器负载**三者相乘：
 
-下一步：把引擎健康段做成真正异步缓存——`/api/state` 只读缓存结果，
-**绝不在请求路径里 spawn 引擎**。
+| 情形 | `GET /api/state` |
+|---|---|
+| 稳定期 | 1.35s |
+| serve 刚起、11 个引擎探测风暴进行中（8 个引擎进程在跑） | 3.1 / 5.6 / 4.6s |
+| 机器被 Marvis 压满时（本次 swap 修复**之前**） | 12~19s |
+
+面板 5s 轮询、托盘也在轮、人再手工 curl 一下，**每个请求都各跑一遍全量 gather**，
+彼此叠加；而引擎探测每 60s 扫一轮（`PROBE_CONCURRENCY=3`，11 个引擎约 15~20s），
+落在风暴里的请求就被拖长。所以真正的修法是**别让它各跑一遍**：
+
+```
+/api/state → stateCached()：单飞（同一时刻只有一个 gather 在跑，其余等同一个结果）
+                        + 2s TTL（远小于 5s 轮询间隔，数据不会变糊）
+?fresh=1 / POST /api/refresh → 强制绕开缓存
+```
+
+同一个冷启动场景下，4 个并发请求从 3~5.6s 降到 **5~10ms**（全部命中托盘刚喂热的缓存）。
+新鲜度四种情形都验过：TTL 内命中同一个 `at`、`?fresh=1` 拿到更新的 `at`、
+TTL 到期重算、`/api/refresh` 强制重算。
+
+两条顺手纠正的度量习惯：
+- 上一轮记的「CLI 侧 services --l2 = 1.0s」里**大部分是 node 冷启动 + TS 转译**，
+  真正的 discover+probe 只有 0.26s。以后量单段耗时一律在**同一进程内**量。
+
+## swap 占用高：查清、处置、并留下能自己看的工具（2026-09-29）
+
+现象：`agentbd resources` 报 swap 已用 76~85%，而 `memory_pressure -Q` 同时报
+「系统空闲 81%」。两个数看着矛盾，先把结论写在这里省得下次再查：
+
+### 1）`memory_pressure` 的「空闲」含可回收文件缓存，别拿它判断 swap
+
+`vm_stat` 拆开看（32GB 物理内存的机器）：`active 12.6 + wired 3.1 + compressor 6.0`
+= **约 22GB 是回不去的脏页**，另有 12.5GB `inactive` 是可回收的文件缓存——
+`memory_pressure` 把后者也算进「空闲」，所以它报 81% 空闲与 swap 用到 81% **同时成立**。
+这正是守卫必须同时看 swap 的原因：只看内存空闲会漏判。
+
+### 2）macOS 没有 `swapoff`，swap 高往往是算术必然而不是泄漏
+
+`sudo swapoff` 在这台机器上不存在，`sudo purge` 只清文件缓存不清 swap。
+唯一能立刻把 swap 清零的是**注销或重启**。能做的只有减少常驻脏页，
+让内核自己慢慢回收——**这次实测到它真的会回收**：停掉 Marvis 之后
+swap 文件总量从 5120M 自己缩到 4096M。
+
+判据（已写进 `resources --deep`）：`vm_stat` 的 `Swapins`/`Swapouts` **两端都大**
+= 正在持续换页，不是历史遗留；`active+wired+compressor` 超过物理内存 60%
+= swap 高是算术必然，减常驻才是解法。
+
+### 3）处置与效果
+
+真正的占用是用户级 App，agent-hub 自身只占 40MB（`agentbd-panel`）——**泄漏不在我们这边**。
+按 App 聚合后第一名是 `MarvisKnowledgebase`：**3 个进程 2.32GB**，且 Marvis 的一个
+renderer **跑满一核连续 24 小时**。经用户确认后 `osascript quit` 优雅退出：
+
+| | 前 | 后 |
+|---|---|---|
+| swap 已用 | 3996 MB / total 5120（81%） | **2657 MB / total 4096（65%）** |
+| 空闲页 | 179 MB | **4.4 GB** |
+| 脏页 active+wired+compressor | 19.2 GB | **16.4 GB** |
+| `GET /api/state` | 12~19s | 1.35s（稳定期） |
+
+Marvis 的 LaunchAgent 是 `RunAtLoad` 无 `KeepAlive`，所以退出后不会被拉起；
+它的 daemon 是 `KeepAlive=true` 但只占 24MB，**没有动它**（杀了也会被 launchd 立刻重拉，
+只会白白多一次冷启动）。用 `osascript quit` 而不是 `pkill`：给它机会保存状态。
+
+### 4）新增 `agentbd resources --deep`
+
+给两样东西：`vm_stat` 脏页拆解（含压缩比与换页累计），以及**按 App 聚合**的 RSS 排行。
+按 App 而不是按进程，是因为 Electron/Chrome 一个 App 就有十几个 helper，
+按进程看最大的才几百 MB，加起来才是真凶。
+
+⚠️ **这里踩过一个会让结论完全跑偏的命名 bug**：原先按空白切 `argv[0]` 取 basename，
+而 macOS 路径里常有空格（`~/Library/Application Support/…`），于是切成
+`…/Library/Application`，把 MarvisKnowledgebase 等三个不相干的常驻件并成一个
+**假的 2.6GB「Application」桶**，排第一却认不出是谁——我手工分析的第一版也被它骗了。
+改为以 `comm`（内核记的可执行文件路径，无参数歧义）命名，解释器再用脚本名细分
+（取尾巴：路径前缀被空格截断无所谓，basename 只要尾对）。
+`guard-test.mjs` 里留了两条回归断言：不得再出现 `Application` 桶、
+不得把解释器并成笼统的 `node`/`python`。现在共 21 项。
+
+### 5）附带发现的可靠性隐患（重要）
+
+`serve` 的 socket 激活作业（`~/Library/LaunchAgents/ai.agentbd.serve.plist`）
+**在磁盘上消失了**，`launchctl print` 也查不到，而 serve 有 `--idle 10` 空闲自退。
+两者叠加的后果：**serve 一旦自退就再没人拉起，整个 hub 静默瘫掉**，
+面板显示连不上而没人知道为什么。本次已 `agentbd serve install --port 7787 --idle 10`
+重装并验证按需唤醒恢复（托盘 SSE 重连即唤醒，进程 `ppid=1`、监听 fd 为继承的 fd 0）。
+
+- 排查口诀：`HTTP 000` 且耗时 **~0.2ms** = 连接被拒（进程不在）；
+  耗时逼近 `--max-time` 才是真的慢。别把两者混成「接口超时」。
+- `agentbd serve status` 会直接报 `plist: (未安装)` / `launchd: 未加载`，先看它。
+- 这台机器装着 CleanMyMac 的 HealthMonitor，这类清理工具会删它认为多余的 LaunchAgent；
+  凡是「依赖 LaunchAgent 常驻/按需」的功能，都要假设 plist 会被人或清理工具删掉，
+  **在自检里显式检查 plist 是否存在**，而不是假设装过就一直装着。
+- 重复 `launchctl kickstart -k` 期间可能**短暂有两个进程共用同一个继承来的监听 socket**，
+  内核把连接分到两边，于是两份独立缓存会让返回值看起来「时间倒退」。
+  重启 serve 后用 `lsof -nP -iTCP:7787 -sTCP:LISTEN` 确认只有一个监听者。
 

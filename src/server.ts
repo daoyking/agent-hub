@@ -205,6 +205,37 @@ async function runEngineDeep(spec: EngineSpec): Promise<void> {
   });
 }
 
+/**
+ * /api/state 的「单飞 + 短缓存」。
+ *
+ * 为什么需要：gatherState 自身只要 ~0.6s，但面板 5s 轮询、托盘也在轮、
+ * 手工 curl 会各跑一遍全量 discover/probe/readAssessment，彼此叠加。
+ * 实测耗时主要随机器负载与引擎探测风暴浮动（稳定 1.3s、风暴中 3~5.6s、
+ * 机器被压满时 12~19s），所以关键是**别让并发请求各跑一遍**：
+ * 同一时刻只让一个 gather 在跑，其余等同一个结果；2s 内的重复请求直接吃缓存。
+ *
+ * 注意这不是把结果「做旧」：TTL 2s 远小于 5s 轮询间隔，面板看到的数据不会变糊；
+ * 需要立刻看真相时带 ?fresh=1 绕开。
+ */
+const STATE_TTL_MS = 2000;
+let stateCache: { body: ServerState; at: number } | null = null;
+let stateInflight: Promise<ServerState> | null = null;
+
+async function stateCached(fresh: boolean): Promise<ServerState> {
+  if (!fresh && stateCache && Date.now() - stateCache.at < STATE_TTL_MS) return stateCache.body;
+  if (stateInflight) return stateInflight;
+  stateInflight = (async () => {
+    try {
+      const body = await gatherState();
+      stateCache = { body, at: Date.now() };
+      return body;
+    } finally {
+      stateInflight = null;
+    }
+  })();
+  return stateInflight;
+}
+
 async function gatherState(): Promise<ServerState> {
   ensureEngineHealthTimer();
   const probed: LocalService[] = await Promise.all(
@@ -480,7 +511,7 @@ export async function startServer(opts: {
           res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
           res.end(uiHtml);
         } else if (req.method === 'GET' && url.pathname === '/api/state') {
-          json(res, 200, await gatherState());
+          json(res, 200, await stateCached(url.searchParams.get('fresh') === '1'));
         } else if (req.method === 'GET' && url.pathname === '/events') {
           res.writeHead(200, {
             'Content-Type': 'text/event-stream',
@@ -549,7 +580,8 @@ export async function startServer(opts: {
           json(res, 202, { accepted: true, engine: id });
           void runEngineDeep(spec);
         } else if (req.method === 'POST' && url.pathname === '/api/refresh') {
-          const state = await gatherState();
+          // 显式刷新：必须绕开 2s 缓存，否则用户点刷新拿到的还是旧数据
+          const state = await stateCached(true);
           json(res, 200, state);
           broadcast({ k: 'state', state });
         } else {
