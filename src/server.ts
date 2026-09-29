@@ -40,6 +40,19 @@ import type { ApprovalRequest } from './normalize.ts';
 const UI_FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), 'ui.html');
 
 export type ServerState = {
+  /**
+   * 常驻状态：这个进程为什么还活着、会不会自退。
+   * 见 serveWithServer 里 idle 自退那段注释——托盘挂着 SSE 时它永不触发，
+   * 而手工 `agentbd serve` 干脆没有 idle 退出。过去这两件事完全隐形。
+   */
+  residency?: {
+    mode: 'launchd-socket' | 'manual';
+    /** 空闲多久自退；0 = 不会自退 */
+    idleExitMs: number;
+    /** 当前挂着的 SSE 长连接数（>0 就意味着 idle 自退被摁住） */
+    sse: number;
+    uptimeSec: number;
+  };
   engines: Array<{
     id: string;
     label: string;
@@ -239,9 +252,20 @@ async function gatherState(): Promise<ServerState> {
     })),
     services,
     mcp,
+    residency: {
+      mode: socketActivated ? 'launchd-socket' : 'manual',
+      idleExitMs: idleExitCfg,
+      sse: sseClients.size,
+      uptimeSec: Math.round((Date.now() - startedAt) / 1000),
+    },
     at: Date.now(),
   };
 }
+
+/** 常驻状态的可观测数据（serveWithServer 启动时填充） */
+const startedAt = Date.now();
+let socketActivated = false;
+let idleExitCfg = 0;
 
 /**
  * 引擎健康缓存。
@@ -559,6 +583,22 @@ export async function startServer(opts: {
 
   // 空闲自退（launchd on-demand 配套）：无活跃连接持续 idleExitMs 就退出，
   // 监听 socket 仍在 launchd 手里，下次连接会自动拉起新进程。SSE 长连接算活跃。
+  //
+  // ⚠️ 两条过去没人说清楚的性质（2026-09-28 实测，写进 /api/state 的 residency）：
+  // ① **手工 `agentbd serve` 没有 idle 退出**——cli.ts 只在传了 --fd（socket 激活）时
+  //    才给 idleExitMs。手工跑的进程会一直活着，直到 Ctrl-C。
+  // ② **托盘挂着的 SSE 长连接会永久摁住 idle 自退**（active 永不为 0）。
+  //    实测本机因此常驻 1 天 18 小时、累计 46 分钟 CPU（svcWatch 每 120s 全量
+  //    discovery ≈1.6s 所致）。这不是 bug 而是代价：托盘要实时数据就必须有常驻服务，
+  //    所以与其假装"零常驻"，不如把原因如实报出来（见 README「零常驻」一节）。
+  socketActivated = opts.activateFd !== undefined;
+  idleExitCfg = opts.idleExitMs && opts.idleExitMs > 0 ? opts.idleExitMs : 0;
+  console.log(
+    `常驻模式: ${socketActivated ? 'launchd socket 激活' : '手工启动'}` +
+      (idleExitCfg
+        ? ` · 空闲 ${Math.round(idleExitCfg / 60000)}min 自退（但托盘的 SSE 连接会阻止自退）`
+        : ' · 不会自退（未启用 idle 退出）'),
+  );
   if (opts.idleExitMs && opts.idleExitMs > 0) {
     let active = 0;
     let lastActivity = Date.now();

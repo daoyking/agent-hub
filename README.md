@@ -284,6 +284,18 @@ $ agentbd mcp probe      → 第二次 0ms（缓存）；--refresh 强制真探
 
 解决「面板要好用又不想养一个常驻进程」——**零常驻开销**方案：
 
+> ⚠️ **"零常驻"只在「没人用的时候」成立**（2026-09-28 实测校正）：
+> 托盘/面板只要挂着 `/events` 的 SSE 长连接，idle 自退就被**永久摁住**——
+> `active` 计数把 SSE 算作活跃，这是注释里写明的有意设计。实测本机因此常驻
+> 1 天 18 小时、累计 **46 分钟 CPU**（`svcWatch` 每 120s 跑一次全量 discovery，
+> 每轮 ≈1.6s 的 lsof + plutil + L2 探针）。
+> 另一条更容易踩：**手工 `agentbd serve` 根本没有 idle 退出**，
+> 只有 launchd socket 激活（传了 `--fd`）才会启用。
+>
+> 现在这两件事都不再隐形：启动日志打印常驻模式，`GET /api/state` 的 `residency`
+> 返回 `{mode, idleExitMs, sse, uptimeSec}`——`sse > 0` 就是"有 UI 正摁着自退"。
+> 托盘要实时数据就必须有常驻服务，与其假装零常驻，不如把代价标出来。
+
 ```
 $ agentbd serve install    # 写 plist + launchctl bootstrap，完成
 $ curl http://127.0.0.1:7787/api/stats   # 首个连接 → launchd 自动拉起进程 → HTTP 200
