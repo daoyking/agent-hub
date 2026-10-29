@@ -1,0 +1,16 @@
+{
+  "top_10_daily_stars": [
+    {"rank": 1, "repo": "HKUDS/DeepTutor", "stars_today": 2371, "description": "DeepTutor: Lifelong Personalized Tutoring. [https://deeptutor.info/](https://deeptutor.info/)."},
+    {"rank": 2, "repo": "elayadesign/ai-design-skills", "stars_today": 2139, "description": "AI agent skills for working with Expo projects and Expo Application Services"},
+    {"rank": 3, "repo": "Nutlope/hallmark", "stars_today": 2110, "description": "Anti-AI-slop design skill for Claude Code, Cursor, and Codex."},
+    {"rank": 4, "repo": "hmjz100/LinkSwift", "stars_today": 1616, "description": "一个基于 JavaScript 的网盘文件下载地址获取工具。基于【网盘直链下载助手】修改 ，支持 百度网盘 / 阿里云盘 / 中国移动云盘 / 天翼云盘 / 迅雷云盘 / 夸克网盘 / UC网盘 / 123云盘 八大网盘"},
+    {"rank": 5, "repo": "togg53192-cmd/jailbreaks", "stars_today": 1477, "description": "LIST OF ALL MY JAILBREAKS"},
+    {"rank": 6, "repo": "pbakaus/impeccable", "stars_today": 1472, "description": "The design vocabulary for your coding agent. Steer with polish and bolder, review with critique and audit, catch AI slop before it ships."},
+    {"rank": 7, "repo": "obra/superpowers", "stars_today": 1095, "description": "An agentic skills framework & software development methodology that works."},
+    {"rank": 8, "repo": "JetBrains/thinkrail", "stars_today": 1068, "description": "Vibe code with pi in a lightweight, real IDE that customises itself around the way you work — The Vibe You Need"},
+    {"rank": 9, "repo": "nightly-labs/openbot", "stars_today": 1054, "description": "A local-first desktop workspace for persistent AI teammates. Run Codex, Claude, and Grok with dedicated workspaces, task queues, file sharing, browser control, and agent-to-agent collaboration."},
+    {"rank": 10, "repo": "makecindy/cindy", "stars_today": 728, "description": "Consider it done. The open-source AI agent that works out of the box · 想到，就能做到。开源、开箱即用的 AI Agent。"}
+  ],
+  "generated_at": "2026-10-28",
+  "source": "GitHub Trending Daily"
+}
